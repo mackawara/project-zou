@@ -2,7 +2,7 @@ import { MongoClient, type Db } from "mongodb";
 import type { Shipment, TransportRequest, Trip, TripDetails } from "./domain";
 
 export type Action = { id: string; title: string; description?: string };
-export const flowNames = ["search", "trip", "shipper", "trucker", "offer", "capacity"] as const;
+export const flowNames = ["search", "trip", "trucker"] as const;
 export type FlowName = typeof flowNames[number];
 export type Message =
   | { kind: "text"; body: string }
@@ -20,6 +20,11 @@ export type FlowTicket = {
     requestId?: string; tripId?: string; shipmentId?: string; draftTrip?: TripDetails;
   }; expiresAt: Date;
 };
+export type PendingInput = {
+  _id: string; input: "shipper" | "offer" | "capacity";
+  data: { requestId?: string; tripId?: string; shipmentId?: string };
+  expiresAt: Date;
+};
 
 export function collections(db: Db) {
   return {
@@ -29,6 +34,7 @@ export function collections(db: Db) {
     searchMetrics: db.collection<Pick<TransportRequest, "_id" | "pickup" | "dropoff" | "createdAt" | "matchedAt">>("searchMetrics"),
     shipments: db.collection<Shipment>("shipments"),
     tickets: db.collection<FlowTicket>("flowTickets"),
+    inputs: db.collection<PendingInput>("pendingInputs"),
     contacts: db.collection<{ _id: string; lastIncomingAt: Date; expiresAt: Date }>("contacts"),
     inbox: db.collection<{ _id: string; event?: Event; attempts: number; nextAt: Date; expiresAt: Date; failed?: boolean }>("inbox"),
     outbox: db.collection<{ _id: string; to?: string; message?: Message; attempts: number; nextAt: Date; expiresAt: Date; failed?: boolean }>("outbox"),
@@ -61,6 +67,7 @@ export async function ensureIndexes(db: Db) {
   const c = collections(db);
   await Promise.all([
     c.tickets.createIndex({ expiresAt: 1 }, { expireAfterSeconds: 0 }),
+    c.inputs.createIndex({ expiresAt: 1 }, { expireAfterSeconds: 0 }),
     c.contacts.createIndex({ expiresAt: 1 }, { expireAfterSeconds: 0 }),
     c.inbox.createIndex({ expiresAt: 1 }, { expireAfterSeconds: 0 }),
     c.outbox.createIndex({ expiresAt: 1 }, { expireAfterSeconds: 0 }),

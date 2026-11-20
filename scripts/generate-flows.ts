@@ -1,4 +1,4 @@
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, rm, writeFile } from "node:fs/promises";
 import { cargo, towns } from "../src/domain";
 
 const input = (name: string, label: string, required = true, max = 80) => ({
@@ -21,22 +21,18 @@ const forms = {
       date, { ...input("time", "Departure time", true, 5), "helper-text": "Use 24-hour time, e.g. 07:30" }, input("capacity", "Space (tonnes)", true, 4),
       dropdown("acceptedCargo", "Cargo you can carry", cargo, true)],
   },
-  shipper: {
-    title: "Shipper details", fields: [
-      note("Zunde uses your name and WhatsApp number to arrange your shipment and send updates. The trucker gets your number once you accept their offer."),
-      input("name", "Full name"),
-    ],
-  },
   trucker: {
     title: "Trucker details", fields: [note("Zunde uses these details to operate the pilot and sends updates about your adverts. Your WhatsApp number is shared once a shipper accepts your offer."),
       input("name", "Full name"), input("nationalId", "National ID", true, 20),
       input("registration", "Truck registration", true, 20), input("company", "Company name", true, 100)],
   },
-  offer: { title: "Send freight offer", fields: [input("price", "Total price in USD", true, 9)] },
-  capacity: { title: "Update space", fields: [note("Enter 0 to remove this trip from search results until you update the space again."), input("capacity", "Space left (tonnes)", true, 4)] },
 };
 
 await mkdir("dist/whatsapp-flows", { recursive: true });
+// Remove obsolete generated single-value forms from previous runs.
+for (const key of ["shipper", "offer", "capacity"]) {
+  await rm(`dist/whatsapp-flows/${key}.json`, { force: true });
+}
 for (const [key, { title, fields }] of Object.entries(forms)) {
   const payload = Object.fromEntries(fields.flatMap((field) => "name" in field ? [[field.name, "${form." + field.name + "}"]] : []));
   const definition = {

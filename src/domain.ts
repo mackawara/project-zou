@@ -46,7 +46,8 @@ export type TransportRequest = RequestDetails & {
 export type Shipment = {
   _id: string; requestId: string; tripId: string; shipper: string; trucker: string;
   createdAt: Date; replyBy: Date; state: "requested" | "offered" | "confirmed" | "completed" | "cancelled" | "declined";
-  priceCents?: number; confirmedAt?: Date; cancelledAt?: Date; cancelledBy?: string;
+  priceCents?: number; offeredAt?: Date; declinedAt?: Date; declinedBy?: string;
+  confirmedAt?: Date; cancelledAt?: Date; cancelledBy?: string;
   deliveredAt?: Date; receivedAt?: Date; completedAt?: Date;
 };
 

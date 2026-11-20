@@ -6,6 +6,7 @@
   "engines": { "node": ">=22" },
   "scripts": {
     "dev": "next dev",
+    "start:ngrok": "ngrok http --domain=simple-proving-radiantly.ngrok-free.dev 3001",
     "build": "next build",
     "start": "next start",
     "worker": "node --import tsx src/worker.ts",
