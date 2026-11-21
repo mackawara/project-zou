@@ -1,0 +1,196 @@
+name: Build and Deploy
+
+on:
+  push:
+    branches: [main, staging]
+    paths:
+      - src/**
+      - scripts/**
+      - tests/**
+      - package.json
+      - package-lock.json
+      - next.config.ts
+      - tsconfig.json
+      - Dockerfile
+      - .dockerignore
+      - docker-compose.yml
+      - .github/workflows/deploy.yml
+  workflow_dispatch:
+
+# Never run two deploys to the VM at once.
+concurrency:
+  group: deploy-${{ github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  IMAGE: ${{ secrets.DOCKERHUB_USERNAME }}/zunde
+
+jobs:
+  # ─── Job 1: Typecheck, test & build ───────────────────────────────────────
+  check:
+    name: Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run check
+
+      - name: Test
+        run: npm test
+
+      - name: Build check
+        run: npm run build
+
+  # ─── Job 2: Build & Push Docker Image ─────────────────────────────────────
+  build-push:
+    name: Build & Push Image
+    runs-on: ubuntu-latest
+    needs: check
+    steps:
+      - uses: actions/checkout@v4
+
+      # Emulation for the arm64 runtime stage (npm install only; the Next.js
+      # build stage runs natively on the runner).
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to DockerHub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_PASSWORD }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          platforms: linux/arm64
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          tags: |
+            ${{ env.IMAGE }}:${{ github.sha }}
+            ${{ env.IMAGE }}:${{ github.ref_name }}
+
+  # ─── Job 3: Deploy with Rollback ──────────────────────────────────────────
+  deploy:
+    name: Deploy to Oracle VM
+    runs-on: ubuntu-latest
+    needs: build-push
+    env:
+      HOST: ${{ secrets.ORACLE_VM_URL }}
+      SSH_USER: ${{ secrets.SSH_USER }}
+      APP_DIR: repos/zunde   # relative to the SSH user's home directory
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: docker-compose.yml
+          sparse-checkout-cone-mode: false
+
+      - name: Set SSH key
+        run: |
+          install -m 700 -d ~/.ssh
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/deploy.key
+          chmod 600 ~/.ssh/deploy.key
+          cat >> ~/.ssh/config <<CONF
+          Host vm
+            HostName $HOST
+            User $SSH_USER
+            IdentityFile ~/.ssh/deploy.key
+            StrictHostKeyChecking accept-new
+          CONF
+
+      - name: Upload compose file
+        run: |
+          ssh vm "mkdir -p \"$APP_DIR\""
+          scp docker-compose.yml "vm:$APP_DIR/docker-compose.yml"
+
+      - name: Deploy with rollback
+        run: |
+          # Quoted heredoc: nothing below is expanded on the runner, so no
+          # escaping is needed. Values are passed as arguments instead.
+          ssh vm bash -s -- "$IMAGE" "${{ github.sha }}" "$APP_DIR" <<'EOF'
+            set -euo pipefail
+            IMAGE="$1"; NEW_TAG="$2"; APP_DIR="$3"
+            cd "$HOME/$APP_DIR"
+
+            if [ ! -s .env ] || ! grep -q '^ZUNDE_DATA_KEY=.' .env; then
+              echo "❌ $PWD/.env is missing or has no ZUNDE_DATA_KEY. Create it from .env.example first."
+              exit 1
+            fi
+
+            set_env_var() {
+              if grep -q "^$1=" .env; then
+                sed -i "s|^$1=.*|$1=$2|" .env
+              else
+                echo "$1=$2" >> .env
+              fi
+            }
+
+            echo "▶ New image tag: $NEW_TAG"
+
+            # ── Save current tag for rollback ──────────────────────────────
+            PREV_TAG=$(docker inspect --format='{{.Config.Image}}' zunde-web 2>/dev/null | awk -F: '{print $NF}' || true)
+            if [ -n "$PREV_TAG" ]; then
+              echo "▶ Previous tag saved for rollback: $PREV_TAG"
+            else
+              echo "No previous container found — fresh deploy"
+            fi
+
+            # ── Pull & start ───────────────────────────────────────────────
+            echo "▶ Pulling $IMAGE:$NEW_TAG ..."
+            docker pull "$IMAGE:$NEW_TAG"
+            set_env_var IMAGE "$IMAGE"
+            set_env_var IMAGE_TAG "$NEW_TAG"
+            # Recreate so restart counts below start at 0, even on a re-run.
+            docker compose up -d --remove-orphans --force-recreate
+
+            # ── Health check (up to 60s) ───────────────────────────────────
+            # The web server must answer HTTP (the webhook GET returns 403
+            # without Meta's token) and the worker must stay up after
+            # connecting to MongoDB, which is where it fails on bad config.
+            PORT=$(grep -E '^HOST_PORT=' .env | cut -d= -f2 || true)
+            PORT=${PORT:-3000}
+            echo "▶ Health checking..."
+            for i in $(seq 1 12); do
+              sleep 5
+              WEB=$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$PORT/api/whatsapp/webhook" || true)
+              WORKER=$(docker inspect -f '{{.State.Running}} {{.RestartCount}}' zunde-worker 2>/dev/null || echo "false 0")
+              if [ "$WEB" = "403" ] && [ "$WORKER" = "true 0" ] && [ "$i" -ge 3 ]; then
+                echo "✅ Deploy successful: $NEW_TAG"
+                docker image prune -f || true
+                exit 0
+              fi
+              echo "  Attempt $i/12 — web HTTP $WEB, worker running/restarts: $WORKER"
+            done
+
+            echo "── Recent logs ──"
+            docker compose logs --tail 40 web worker || true
+
+            # ── Rollback ───────────────────────────────────────────────────
+            echo "❌ Deploy failed. Rolling back to ${PREV_TAG:-<none>}..."
+            if [ -z "$PREV_TAG" ]; then
+              echo "No previous image to roll back to. Manual intervention needed."
+              exit 1
+            fi
+            set_env_var IMAGE_TAG "$PREV_TAG"
+            docker compose up -d --remove-orphans
+            echo "⏪ Rolled back to $PREV_TAG"
+            exit 1
+          EOF
+
+      - name: Remove SSH key
+        if: always()
+        run: rm -f ~/.ssh/deploy.key

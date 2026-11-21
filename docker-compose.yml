@@ -1,0 +1,20 @@
+# Deployed to the Oracle VM by .github/workflows/deploy.yml, which copies this
+# file to the app directory and sets IMAGE and IMAGE_TAG in its .env.
+# Keep the rest of the settings from .env.example in that same .env file.
+services:
+  web:
+    image: ${IMAGE}:${IMAGE_TAG}
+    container_name: zunde-web
+    restart: unless-stopped
+    env_file: .env
+    # Loopback only: put a TLS reverse proxy (nginx, Caddy) in front, since
+    # Meta requires an HTTPS webhook. Change HOST_PORT in .env to move it.
+    ports:
+      - "127.0.0.1:${HOST_PORT:-3000}:3000"
+
+  worker:
+    image: ${IMAGE}:${IMAGE_TAG}
+    container_name: zunde-worker
+    restart: unless-stopped
+    env_file: .env
+    command: ["node", "--import", "tsx", "src/worker.ts"]
