@@ -4,6 +4,8 @@ Zunde matches shippers with spare truck capacity through WhatsApp. The Next.js s
 
 ## Pilot workflow
 
+New users who message Zunde for the first time get a short explanation of the service with the main menu. Anyone can reply **HELP** for an overview and short guides for shippers, truckers and receivers. The text lives in `src/guide.ts`.
+
 1. The shipper opens **Find a truck** and submits pickup, destination, ready date, cargo type and weight. No registration is needed to see results. Searches can be reopened from **My activity**.
 2. The trucker uses **Advertise space** to submit a route, departure, available tonnes and cargo types. On the first advert, Zunde asks for name, national ID, truck registration and company name. Completing that form unlocks posting and receiving requests. Staff do not review documents in the pilot.
 3. The matcher returns up to ten future departures that cover the route in the right direction, leave on the ready date or next two calendar days in Zimbabwe, accept the cargo, and list enough space. It sorts by departure. The initial corridor runs Harare → Kwekwe → Gweru → Bulawayo → Hwange → Victoria Falls and supports both directions.
