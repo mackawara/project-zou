@@ -7,10 +7,13 @@ services:
     container_name: zunde-web
     restart: unless-stopped
     env_file: .env
+    # PORT in .env sets both the port Next.js listens on and the host port.
     # Loopback only: put a TLS reverse proxy (nginx, Caddy) in front, since
-    # Meta requires an HTTPS webhook. Change HOST_PORT in .env to move it.
+    # Meta requires an HTTPS webhook.
+    environment:
+      PORT: ${PORT:-3000}
     ports:
-      - "127.0.0.1:${HOST_PORT:-3000}:3000"
+      - "127.0.0.1:${PORT:-3000}:${PORT:-3000}"
 
   worker:
     image: ${IMAGE}:${IMAGE_TAG}

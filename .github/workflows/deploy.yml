@@ -161,8 +161,8 @@ jobs:
             # The web server must answer HTTP (the webhook GET returns 403
             # without Meta's token) and the worker must stay up after
             # connecting to MongoDB, which is where it fails on bad config.
-            PORT=$(grep -E '^HOST_PORT=' .env | cut -d= -f2 || true)
-            PORT=${PORT:-3000}
+            PORT=$(docker port zunde-web | head -n1 | awk -F: '{print $NF}')
+            echo "▶ Web port: $PORT"
             echo "▶ Health checking..."
             for i in $(seq 1 12); do
               sleep 5

@@ -42,7 +42,7 @@ One-time VM setup:
 
 1. Install Docker with the Compose plugin and let the SSH user run `docker`.
 2. Create `~/repos/zunde/.env` from `.env.example` with the production values. The workflow copies `docker-compose.yml` beside it and keeps `IMAGE` and `IMAGE_TAG` in that file up to date.
-3. The web server listens on `127.0.0.1:3000` (set `HOST_PORT` in `.env` to change it). Put an HTTPS reverse proxy such as nginx or Caddy in front of it for the Meta webhook.
+3. The web server listens on `127.0.0.1:3000`. Set `PORT` in `.env` to use another port. Put an HTTPS reverse proxy such as nginx or Caddy in front of it for the Meta webhook.
 
 Repository secrets: `DOCKERHUB_USERNAME`, `DOCKERHUB_PASSWORD` (an access token), `ORACLE_VM_URL`, `SSH_USER` and `SSH_PRIVATE_KEY`.
 
