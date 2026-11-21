@@ -34,6 +34,20 @@ Open [the local dashboard](http://localhost:3000). Development without a databas
 
 The webhook verifies Meta's signature before saving events. MongoDB transactions commit business changes, message processing and outgoing messages together. The inbox deduplicates repeat events, and the worker retries temporary send failures. Keep the database key and credentials in the server environment. Back up the key securely alongside the database because it protects trucker IDs and signs receipt links.
 
+## Deploy to an Oracle VM
+
+`.github/workflows/deploy.yml` runs on pushes to `main` and `staging` (or manually). It typechecks, tests and builds, pushes a `linux/arm64` image to Docker Hub tagged with the commit SHA and branch, then deploys it over SSH with `docker compose`. One image runs both the web server and the worker.
+
+One-time VM setup:
+
+1. Install Docker with the Compose plugin and let the SSH user run `docker`.
+2. Create `~/repos/zunde/.env` from `.env.example` with the production values. The workflow copies `docker-compose.yml` beside it and keeps `IMAGE` and `IMAGE_TAG` in that file up to date.
+3. The web server listens on `127.0.0.1:3000` (set `HOST_PORT` in `.env` to change it). Put an HTTPS reverse proxy such as nginx or Caddy in front of it for the Meta webhook.
+
+Repository secrets: `DOCKERHUB_USERNAME`, `DOCKERHUB_PASSWORD` (an access token), `ORACLE_VM_URL`, `SSH_USER` and `SSH_PRIVATE_KEY`.
+
+A deploy succeeds when the webhook answers and the worker stays up without restarting for 15 seconds. Otherwise the workflow prints recent logs and restarts the previous image.
+
 ## Checks
 
 ```sh
