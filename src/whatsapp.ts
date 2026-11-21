@@ -92,7 +92,10 @@ export async function sendWhatsApp(to: string, message: Message, inWindow: boole
   if (!WA_GRAPH_VERSION || !/^v\d+\.\d+$/.test(WA_GRAPH_VERSION) || !WA_PHONE_NUMBER_ID || !WA_ACCESS_TOKEN) {
     throw new Error("WhatsApp sending is not configured");
   }
-  if (!inWindow && !WA_UPDATE_TEMPLATE) return;
+  if (!inWindow && !WA_UPDATE_TEMPLATE) {
+    console.warn("Skipped a message outside the 24-hour window because WA_UPDATE_TEMPLATE is not set");
+    return;
+  }
   const payload = inWindow ? messageBody(message) : {
     type: "template", template: { name: WA_UPDATE_TEMPLATE, language: { code: WA_TEMPLATE_LANGUAGE || "en" } },
   };
@@ -104,6 +107,9 @@ export async function sendWhatsApp(to: string, message: Message, inWindow: boole
     const result = await res.json().catch(() => null);
     const code = Number(result?.error?.code);
     if (code === 131047 && inWindow) return sendWhatsApp(to, message, false);
-    throw new Error(`WhatsApp send failed (HTTP ${res.status}${code ? `, code ${code}` : ""})`);
+    // Meta's error text names the problem (unknown template, wrong language, unapproved number) without personal data.
+    const reason = [result?.error?.message, result?.error?.error_data?.details].filter((part) => typeof part === "string").join(": ");
+    const kind = inWindow ? message.kind : `template ${WA_UPDATE_TEMPLATE} (${WA_TEMPLATE_LANGUAGE || "en"})`;
+    throw new Error(`WhatsApp send failed for ${kind} (HTTP ${res.status}${code ? `, code ${code}` : ""})${reason ? ": " + reason.slice(0, 300) : ""}`);
   }
 }
