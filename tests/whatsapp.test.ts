@@ -61,6 +61,20 @@ test("WhatsApp webhook to shipment completion, cancellation, and analytics", { s
       return [received.token, message(from, { interactive: { nfm_reply: { response_json: JSON.stringify({ flow_token: received.token, ...fields }) } } }, id)] as const;
     };
 
+    await say(testTrucker, "Hi");
+    assert.match(last(testTrucker).body, /spare space on trucks/);
+    await say(testTrucker, "Hi again");
+    assert.match(last(testTrucker).body, /^Welcome to Zunde\. What would you like to do\?/);
+    await say(testTrucker, " Help ");
+    assert.match(last(testTrucker).body, /^How Zunde works/);
+    await click(testTrucker, button(testTrucker, "I drive a truck"));
+    assert.match(last(testTrucker).body, /^Carrying loads/);
+    assert.ok(button(testTrucker, "Advertise space"));
+    await click(testTrucker, button(testTrucker, "Main menu"));
+    assert.ok(button(testTrucker, "Find a truck"));
+    await click(testReceiver, "help:receiver");
+    assert.match(last(testReceiver).body, /^Receiving goods/);
+
     const date = localDate(new Date(Date.now() + 48 * hour));
     await say(testTrucker, "advertise space");
     await form(testTrucker, { origin: "Harare", destination: "Hwange", date, time: "16:00", capacity: "5", acceptedCargo: ["Produce"] }, "trip")[1];
