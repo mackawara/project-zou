@@ -6,7 +6,7 @@ import { getAnalytics } from "../src/analytics";
 import { collections, database, ensureIndexes, type Message } from "../src/db";
 import { hour, localDate } from "../src/domain";
 import { transport } from "../src/webhook/incomingMessageHandler";
-import { eventsFrom } from "../src/whatsapp";
+import { eventsFrom, sendWhatsApp } from "../src/whatsapp";
 
 const appSecret = "local-test-secret";
 const testShipper = "263771000001";
@@ -100,6 +100,33 @@ test("hook fails closed when either the app secret or business phone number ID i
   }
 });
 
+test("out-of-window sends use the configured template or report the missing configuration", async (t) => {
+  const keys = ["WA_UPDATE_TEMPLATE", "WA_TEMPLATE_LANGUAGE", "WA_ACCESS_TOKEN", "WA_GRAPH_VERSION"] as const;
+  const saved = keys.map((key) => process.env[key]);
+  t.after(() => keys.forEach((key, index) => {
+    if (saved[index] === undefined) delete process.env[key];
+    else process.env[key] = saved[index];
+  }));
+  process.env.WA_ACCESS_TOKEN = "test-token";
+  process.env.WA_GRAPH_VERSION = "v23.0";
+  process.env.WA_TEMPLATE_LANGUAGE = "en";
+  delete process.env.WA_UPDATE_TEMPLATE;
+  const sent: Record<string, unknown>[] = [];
+  t.mock.method(globalThis, "fetch", async (_url: string, init: RequestInit) => {
+    const payload = JSON.parse(String(init.body));
+    sent.push(payload);
+    return payload.type === "template" ? Response.json({}) : Response.json({ error: { code: 131047 } }, { status: 400 });
+  });
+  const alert = { kind: "text", body: "Match found" } as const;
+  await assert.rejects(sendWhatsApp(testShipper, alert, false), /WA_UPDATE_TEMPLATE/);
+  assert.equal(sent.length, 0);
+  await assert.rejects(sendWhatsApp(testShipper, alert, true), /WA_UPDATE_TEMPLATE/);
+  process.env.WA_UPDATE_TEMPLATE = "pilot_update";
+  await sendWhatsApp(testShipper, alert, true);
+  assert.deepEqual(sent.map((payload) => payload.type), ["text", "text", "template"]);
+  assert.deepEqual(sent.at(-1)?.template, { name: "pilot_update", language: { code: "en" } });
+});
+
 test("WhatsApp webhook to shipment completion, cancellation, and analytics", { skip: !process.env.TEST_MONGODB_URI }, async () => {
   process.env.MONGODB_URI = process.env.TEST_MONGODB_URI;
   process.env.MONGODB_DB = "zunde_test_" + randomUUID().replaceAll("-", "");
@@ -146,23 +173,34 @@ test("WhatsApp webhook to shipment completion, cancellation, and analytics", { s
     };
 
     const date = localDate(new Date(Date.now() + 48 * hour));
-    await say(testTrucker, "advertise space");
-    await form(testTrucker, { origin: "Harare", destination: "Hwange", date, time: "16:00", capacity: "5", acceptedCargo: ["Produce"] }, "trip")[1];
-    assert.equal(await c.trips.countDocuments(), 0);
-    await form(testTrucker, { name: "Test Driver", registration: "ABC 1001", company: "Test Freight", nationalId: "63-1234567-F-42" }, "trucker")[1];
-    assert.equal(await c.trips.countDocuments(), 1);
-    const registered = await c.profiles.findOne({ _id: testTrucker });
-    assert.ok(registered?.trucker?.nationalIdEncrypted);
-    assert.doesNotMatch(JSON.stringify(registered), /1234567/);
     const data = { pickup: "Kwekwe", dropoff: "Bulawayo", date, cargo: "Produce", weight: "2", notes: "Keep dry" };
     await say(testShipper, "find a truck");
     const [token, submission] = form(testShipper, data, "search", "search-1");
     await submission;
     const searchReply = { interactive: { nfm_reply: { response_json: JSON.stringify({ flow_token: token, ...data }) } } };
     await message(testShipper, searchReply, "search-1");
+    assert.match(last(testShipper).body, /No truck fits/);
     assert.equal(await c.requests.countDocuments(), 1);
     assert.equal(await c.profiles.countDocuments({ _id: testShipper }), 0);
-    const select = button(testShipper, "Truck 1");
+    await say(testTrucker, "advertise space");
+    await form(testTrucker, { origin: "Harare", destination: "Hwange", date, time: "16:00", capacity: "5", acceptedCargo: ["Produce"] }, "trip")[1];
+    assert.equal(await c.trips.countDocuments(), 0);
+    assert.match(last(testShipper).body, /No truck fits/);
+    const registration = { name: "Test Driver", registration: "ABC 1001", company: "Test Freight", nationalId: "63-1234567-F-42" };
+    const [registrationToken, posted] = form(testTrucker, registration, "trucker", "new-advert");
+    await posted;
+    await message(testTrucker, { interactive: { nfm_reply: { response_json: JSON.stringify({ flow_token: registrationToken, ...registration }) } } }, "new-advert");
+    assert.equal(await c.trips.countDocuments(), 1);
+    const registered = await c.profiles.findOne({ _id: testTrucker });
+    assert.ok(registered?.trucker?.nationalIdEncrypted);
+    assert.doesNotMatch(JSON.stringify(registered), /1234567/);
+    assert.match(last(testTrucker).body, /1 matching load[\s\S]*Kwekwe → Bulawayo · 2 t of Produce/);
+    assert.doesNotMatch(last(testTrucker).body, new RegExp(testShipper + "|Keep dry"));
+    assert.match(last(testShipper).body, /A truck now fits your load/);
+    assert.doesNotMatch(last(testShipper).body, new RegExp(testTrucker));
+    assert.equal(await c.shipments.countDocuments(), 0);
+    assert.equal(await c.searchMetrics.countDocuments({ matchedAt: { $exists: true } }), 1);
+    const select = button(testShipper, "Request a price");
     await click(testShipper, select);
     assert.equal(last(testShipper).kind, "text");
     assert.match(last(testShipper).body, /Reply with your name/);
@@ -232,6 +270,7 @@ test("WhatsApp webhook to shipment completion, cancellation, and analytics", { s
 
     await say(testShipper, "find a truck");
     await form(testShipper, data, "search")[1];
+    assert.match(last(testTrucker).body, /A shipper is looking for space/);
     await click(testShipper, button(testShipper, "Truck 1"));
     assert.match(last(testShipper).body, /Waiting/);
     await click(testTrucker, button(testTrucker, "Make an offer"));
@@ -269,6 +308,20 @@ test("WhatsApp webhook to shipment completion, cancellation, and analytics", { s
     assert.match(last(testShipper).body, /No truck fits/);
     const stats = await getAnalytics("7");
     assert.deepEqual([stats.requests, stats.trips, stats.matched, stats.confirmed, stats.completed, stats.cancelled], [3, 1, 2, 2, 1, 1]);
+    const beforeIncrease = delivered.length;
+    await click(testTrucker, `capacity:${trip._id}`);
+    await say(testTrucker, "3");
+    assert.equal(delivered.slice(beforeIncrease).filter((item) => item.to === testShipper).length, 1);
+    assert.match(last(testShipper).body, /A truck now fits your load/);
+    assert.match(last(testTrucker).body, /2 matching loads/); // The completed shipment is excluded.
+    assert.equal((await getAnalytics("7")).matched, 3);
+    const beforeRefresh = delivered.length;
+    await click(testTrucker, `manage:${trip._id}`);
+    await click(testTrucker, `capacity:${trip._id}`);
+    await say(testTrucker, "0");
+    await click(testTrucker, `capacity:${trip._id}`);
+    await say(testTrucker, "3");
+    assert.equal(delivered.slice(beforeRefresh).filter((item) => item.to === testShipper).length, 0);
   } finally {
     await client.close();
   }

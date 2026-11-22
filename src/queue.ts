@@ -36,7 +36,7 @@ export async function processIncoming(db: Db, client: MongoClient, now = new Dat
 
 /** Sends the next due outgoing message, limited to replies to `eventId` when given. */
 export async function processOutgoing(db: Db, deliver = sendWhatsApp, now = new Date(), eventId?: string) {
-  const { outbox, contacts } = collections(db);
+  const { outbox, contacts, profiles } = collections(db);
   const item = await outbox.findOneAndUpdate(
     { ...(eventId !== undefined && { _id: replyIds(eventId) }), nextAt: { $lte: now }, message: { $exists: true }, failed: { $ne: true } },
     { $set: { nextAt: new Date(now.getTime() + 30_000) } },
@@ -44,15 +44,19 @@ export async function processOutgoing(db: Db, deliver = sendWhatsApp, now = new 
   );
   if (!item?.message || !item.to) return false;
   try {
+    if (item.matchShipper && await profiles.findOne({ _id: item.matchShipper, "shipperAccess.suspended": true }, { projection: { _id: 1 } })) {
+      await outbox.updateOne({ _id: item._id }, { $unset: { to: "", message: "", matchShipper: "" } });
+      return true;
+    }
     const contact = await contacts.findOne({ _id: item.to });
     const inWindow = !!contact && now.getTime() - contact.lastIncomingAt.getTime() < 24 * hour;
     await deliver(item.to, item.message, inWindow);
-    await outbox.updateOne({ _id: item._id }, { $unset: { to: "", message: "" } });
+    await outbox.updateOne({ _id: item._id }, { $unset: { to: "", message: "", matchShipper: "" } });
   } catch (error) {
     const failed = item.attempts + 1 >= retries;
     await outbox.updateOne({ _id: item._id }, {
       $inc: { attempts: 1 }, $set: { nextAt: retryAt(item.attempts, now), failed },
-      ...(failed && { $unset: { to: "", message: "" } }),
+      ...(failed && { $unset: { to: "", message: "", matchShipper: "" } }),
     });
     logger.error(`${error instanceof Error && error.message.startsWith("WhatsApp send failed") ? error.message : "Outgoing message could not be sent"}: ${item._id}`, error);
   }

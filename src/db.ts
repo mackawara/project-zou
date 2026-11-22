@@ -11,8 +11,12 @@ export type Message =
 export type Event = { id: string; from: string; at: Date } & (
   { kind: "text" | "action"; value: string } | { kind: "flow"; value: string }
 );
+export type ShipperAccess = { suspended: boolean; reason: string; at: Date; admin: string };
+export type Payment = {
+  _id: string; shipper: string; amountCents: number; paidOn: string; method: string; reference: string; recordedBy: string; createdAt: Date;
+};
 type Profile = {
-  _id: string; shipper?: { name: string };
+  _id: string; shipper?: { name: string }; shipperAccess?: ShipperAccess; shipperRevision?: number;
   trucker?: { name: string; nationalIdEncrypted: string; registration: string; company: string };
 };
 export type FlowTicket = {
@@ -28,16 +32,21 @@ export type PendingInput = {
 
 export function collections(db: Db) {
   return {
+    adminCodes: db.collection<{ _id: string; digest?: string; expiresAt: Date; nextSendAt: Date; bucketAt: Date; sends: number; attempts: number; purgeAt: Date }>("adminCodes"),
+    adminSessions: db.collection<{ _id: string; phone: string; expiresAt: Date }>("adminSessions"),
+    payments: db.collection<Payment>("shipperPayments"),
+    accessEvents: db.collection<ShipperAccess & { shipper: string }>("shipperAccessEvents"),
     profiles: db.collection<Profile>("profiles"),
     trips: db.collection<Trip>("trips"),
     requests: db.collection<TransportRequest>("requests"),
+    matchDays: db.collection<{ _id: Date; revision: number; expiresAt: Date }>("matchDays"),
     searchMetrics: db.collection<Pick<TransportRequest, "_id" | "pickup" | "dropoff" | "createdAt" | "matchedAt">>("searchMetrics"),
     shipments: db.collection<Shipment>("shipments"),
     tickets: db.collection<FlowTicket>("flowTickets"),
     inputs: db.collection<PendingInput>("pendingInputs"),
     contacts: db.collection<{ _id: string; lastIncomingAt: Date; expiresAt: Date }>("contacts"),
     inbox: db.collection<{ _id: string; event?: Event; attempts: number; nextAt: Date; expiresAt: Date; failed?: boolean }>("inbox"),
-    outbox: db.collection<{ _id: string; to?: string; message?: Message; attempts: number; nextAt: Date; expiresAt: Date; failed?: boolean }>("outbox"),
+    outbox: db.collection<{ _id: string; to?: string; message?: Message; matchShipper?: string; attempts: number; nextAt: Date; expiresAt: Date; failed?: boolean }>("outbox"),
   };
 }
 
@@ -66,17 +75,24 @@ export function database() {
 export async function ensureIndexes(db: Db) {
   const c = collections(db);
   await Promise.all([
+    c.adminCodes.createIndex({ purgeAt: 1 }, { expireAfterSeconds: 0 }),
+    c.adminSessions.createIndex({ expiresAt: 1 }, { expireAfterSeconds: 0 }),
+    c.payments.createIndex({ shipper: 1, method: 1, reference: 1 }, { unique: true, partialFilterExpression: { reference: { $gt: "" } } }),
+    c.payments.createIndex({ paidOn: -1, createdAt: -1 }),
+    c.profiles.createIndex({ "shipperAccess.suspended": 1 }),
     c.tickets.createIndex({ expiresAt: 1 }, { expireAfterSeconds: 0 }),
     c.inputs.createIndex({ expiresAt: 1 }, { expireAfterSeconds: 0 }),
     c.contacts.createIndex({ expiresAt: 1 }, { expireAfterSeconds: 0 }),
     c.inbox.createIndex({ expiresAt: 1 }, { expireAfterSeconds: 0 }),
     c.outbox.createIndex({ expiresAt: 1 }, { expireAfterSeconds: 0 }),
     c.requests.createIndex({ expiresAt: 1 }, { expireAfterSeconds: 0 }),
+    c.matchDays.createIndex({ expiresAt: 1 }, { expireAfterSeconds: 0 }),
     c.inbox.createIndex({ nextAt: 1 }),
     c.outbox.createIndex({ nextAt: 1 }),
     c.trips.createIndex({ departureAt: 1, capacity: 1 }),
     c.trips.createIndex({ trucker: 1, departureAt: 1 }),
     c.requests.createIndex({ shipper: 1, createdAt: -1 }),
+    c.requests.createIndex({ cargo: 1, date: 1, weight: 1 }),
     c.searchMetrics.createIndex({ createdAt: -1 }),
     c.shipments.createIndex({ trucker: 1, createdAt: -1 }),
     c.shipments.createIndex({ shipper: 1, createdAt: -1 }),

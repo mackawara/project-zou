@@ -1,23 +1,16 @@
 "use client";
-
 import Link from "next/link";
 import { usePathname } from "next/navigation";
+import { Icon, type IconName } from "./icons";
 
-const items = [
-  { href: "/", label: "Dashboard home" },
-  { href: "/users", label: "Users" },
-  { href: "/trips", label: "Trips and bookings" },
-  { href: "/reports", label: "Reports" },
+const groups: { label: string; items: [string, string, IconName][] }[] = [
+  { label: "Workspace", items: [["/", "Overview", "overview"], ["/trips", "Trips & bookings", "truck"], ["/routes", "Routes", "route"], ["/reports", "Analytics", "report"]] },
+  { label: "Accounts", items: [["/users", "Shippers & truckers", "people"], ["/payments", "Shipper payments", "wallet"]] },
 ];
-
 export default function Nav() {
   const path = usePathname();
-  return <nav className="sidebar" aria-label="Admin sections">
-    <ul>
-      {items.map(({ href, label }) => {
-        const current = href === "/" ? path === "/" : path.startsWith(href);
-        return <li key={href}><Link href={href} aria-current={current ? "page" : undefined}>{label}</Link></li>;
-      })}
-    </ul>
-  </nav>;
+  return <nav className="side-nav" aria-label="Admin sections">{groups.map(group => <div key={group.label}>
+    <h2>{group.label}</h2><ul>{group.items.map(([href, label, icon]) => <li key={href}>
+      <Link href={href} aria-current={path === href ? "page" : undefined}><Icon name={icon} />{label}</Link>
+    </li>)}</ul></div>)}</nav>;
 }

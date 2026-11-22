@@ -1,8 +1,8 @@
 import type { CSSProperties } from "react";
 import type { Metadata } from "next";
-import { getAnalytics, sampleAnalytics, type Analytics, type Period } from "../../analytics";
-import { formatDeparture } from "../../domain";
-import { Heading, Tabs, Unavailable, load, number } from "../ui";
+import { getAnalytics, sampleAnalytics, type Analytics, type Period } from "../../../analytics";
+import { formatDeparture } from "../../../domain";
+import { Heading, Tabs, Unavailable, load, number } from "../../ui";
 
 export const dynamic = "force-dynamic";
 export const metadata: Metadata = { title: "Reports" };

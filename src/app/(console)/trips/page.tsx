@@ -2,9 +2,9 @@ import type { Metadata } from "next";
 import {
   getRequests, getShipments, getTrips, sampleRequests, sampleShipments, sampleTrips,
   type ShipmentScope, type TripScope,
-} from "../../admin";
-import { dollars } from "../../domain";
-import { Badge, Heading, More, PersonCell, Tabs, Unavailable, When, load, number, shortDate, tonnes } from "../ui";
+} from "../../../admin";
+import { dollars } from "../../../domain";
+import { Badge, Heading, More, PersonCell, Tabs, Unavailable, When, load, number, shortDate, tonnes } from "../../ui";
 
 export const dynamic = "force-dynamic";
 export const metadata: Metadata = { title: "Trips and bookings" };
@@ -23,7 +23,7 @@ export default async function TripsAndBookings({ searchParams }: { searchParams:
     </Heading>
     {view === "trips" ? <Trips scope={params.scope === "all" ? "all" : "open"} />
       : view === "requests" ? <Requests />
-      : <Shipments scope={params.scope === "attention" || params.scope === "all" ? params.scope : "active"} />}
+      : <Shipments scope={params.scope === "completed" || params.scope === "attention" || params.scope === "all" ? params.scope : "active"} />}
   </>;
 }
 
@@ -85,11 +85,11 @@ async function Requests() {
 
 async function Shipments({ scope }: { scope: ShipmentScope }) {
   const data = await load("bookings", () => getShipments(scope), () => sampleShipments(scope));
-  const titles = { active: "Active bookings", attention: "Bookings needing follow-up", all: "All bookings" };
+  const titles = { active: "Active bookings", completed: "Completed shipments", attention: "Bookings needing follow-up", all: "All bookings" };
   return <section className="panel">
     <div className="panel-heading">
       <div><h2>{titles[scope]}</h2><p>Open a booking to see its timeline</p></div>
-      <Tabs label="Booking filter" items={([["active", "Active"], ["attention", "Needs follow-up"], ["all", "All"]] as const).map(([id, label]) => ({
+      <Tabs label="Booking filter" items={([["active", "Active"], ["completed", "Completed"], ["attention", "Needs follow-up"], ["all", "All"]] as const).map(([id, label]) => ({
         href: `/trips?view=shipments${id === "active" ? "" : "&scope=" + id}`, label, current: id === scope,
       }))} />
     </div>

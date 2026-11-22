@@ -6,7 +6,7 @@ export const cargo = ["General goods", "Produce", "Building materials", "Machine
 export const timeZone = "Africa/Harare";
 export const matchWindowDays = 2;
 export const hour = 3_600_000;
-const day = 24 * hour;
+export const day = 24 * hour;
 
 const town = z.enum(towns);
 const text = (max: number) => z.string().trim().min(1).max(max);
@@ -41,7 +41,7 @@ export type Trip = Omit<TripDetails, "date" | "time"> & {
 };
 export type TransportRequest = RequestDetails & {
   _id: string; shipper: string; createdAt: Date; expiresAt?: Date;
-  selectionId?: string; matchedAt?: Date; cancelledAt?: Date;
+  selectionId?: string; matchedAt?: Date; cancelledAt?: Date; matchedTripIds?: string[];
 };
 export type Shipment = {
   _id: string; requestId: string; tripId: string; shipper: string; trucker: string;
@@ -72,20 +72,23 @@ export function dateWindow(date: string) {
   return { start, end: new Date(start.getTime() + (matchWindowDays + 1) * day) };
 }
 
-export function findMatches(request: RequestDetails, trips: Trip[], now: Date) {
+export function tripFits(request: RequestDetails, trip: Trip, now: Date) {
   const pickup = towns.indexOf(request.pickup);
   const dropoff = towns.indexOf(request.dropoff);
-  if (pickup === dropoff) return [];
+  if (pickup === dropoff) return false;
   const { start, end } = dateWindow(request.date);
-  return trips.filter((trip) => {
-    const origin = towns.indexOf(trip.origin);
-    const destination = towns.indexOf(trip.destination);
-    const coversRoute = pickup < dropoff
-      ? origin <= pickup && destination >= dropoff
-      : origin >= pickup && destination <= dropoff;
-    return coversRoute && !trip.closedAt && trip.departureAt > now && trip.departureAt >= start
-      && trip.departureAt < end && trip.capacity >= request.weight && trip.acceptedCargo.includes(request.cargo);
-  }).sort((a, b) => a.departureAt.getTime() - b.departureAt.getTime() || a._id.localeCompare(b._id)).slice(0, 10);
+  const origin = towns.indexOf(trip.origin);
+  const destination = towns.indexOf(trip.destination);
+  const coversRoute = pickup < dropoff
+    ? origin <= pickup && destination >= dropoff
+    : origin >= pickup && destination <= dropoff;
+  return coversRoute && !trip.closedAt && trip.departureAt > now && trip.departureAt >= start
+    && trip.departureAt < end && trip.capacity >= request.weight && trip.acceptedCargo.includes(request.cargo);
+}
+
+export function findMatches(request: RequestDetails, trips: Trip[], now: Date) {
+  return trips.filter((trip) => tripFits(request, trip, now))
+    .sort((a, b) => a.departureAt.getTime() - b.departureAt.getTime() || a._id.localeCompare(b._id)).slice(0, 10);
 }
 
 export function isActive(shipment: Shipment, now: Date) {

@@ -1,5 +1,5 @@
 import type { Db, Document } from "mongodb";
-import { collections, database } from "./db";
+import { collections, database, type ShipperAccess } from "./db";
 import { dateWindow, hour, isActive, type Shipment, type TransportRequest, type Trip } from "./domain";
 
 /** Data for the administrators' dashboard pages, read from what the WhatsApp pilot already stores. */
@@ -109,8 +109,8 @@ function alerts(failedIn: number, failedOut: number, half: number, overdue: numb
       detail: "Either the trucker or the receiver has confirmed delivery, but not both." },
     { id: "inbox", count: failedIn, label: "Messages that could not be handled",
       detail: "Handling stopped after six attempts, so the sender got no reply. Check the web or worker logs." },
-    { id: "outbox", count: failedOut, label: "Replies that could not be sent",
-      detail: "WhatsApp refused these replies after six attempts. Check the worker logs for the Graph API error." },
+    { id: "outbox", count: failedOut, label: "WhatsApp messages that could not be sent",
+      detail: "Replies or notifications failed after six attempts. Check the worker logs for a sending error or missing update template." },
   ].filter(({ count }) => count > 0);
 }
 
@@ -119,7 +119,7 @@ function alerts(failedIn: number, failedOut: number, half: number, overdue: numb
 export type UserRole = "shipper" | "trucker";
 export type UserRow = {
   phone: string; name: string; roles: UserRole[]; company?: string; registration?: string;
-  lastMessageAt?: Date; trips: number; shipments: number;
+  shipperAccess?: ShipperAccess; lastMessageAt?: Date; trips: number; shipments: number;
 };
 
 export async function getUsers({ role, q }: { role?: UserRole; q?: string }): Promise<Listing<UserRow>> {
@@ -134,7 +134,7 @@ export async function getUsers({ role, q }: { role?: UserRole; q?: string }): Pr
   }
   const profiles = await c.profiles.aggregate<{
     _id: string; shipper?: { name: string }; trucker?: { name: string; registration: string; company: string };
-    contact: { lastIncomingAt?: Date }[];
+    shipperAccess?: ShipperAccess; contact: { lastIncomingAt?: Date }[];
   }>([
     { $match: match },
     { $lookup: { from: "contacts", localField: "_id", foreignField: "_id", as: "contact" } },
@@ -148,10 +148,10 @@ export async function getUsers({ role, q }: { role?: UserRole; q?: string }): Pr
   const [trips, asShipper, asTrucker] = await Promise.all([count("trips", "trucker"), count("shipments", "shipper"), count("shipments", "trucker")]);
   return listing(profiles.map((profile) => ({
     phone: profile._id,
-    name: profile.trucker?.name ?? profile.shipper?.name ?? "",
+    name: (role === "shipper" ? profile.shipper?.name : profile.trucker?.name) ?? profile.shipper?.name ?? "",
     roles: (["shipper", "trucker"] as const).filter((r) => profile[r]),
     company: profile.trucker?.company, registration: profile.trucker?.registration,
-    lastMessageAt: profile.contact[0]?.lastIncomingAt,
+    shipperAccess: profile.shipperAccess, lastMessageAt: profile.contact[0]?.lastIncomingAt,
     trips: trips.get(profile._id) ?? 0,
     shipments: (asShipper.get(profile._id) ?? 0) + (asTrucker.get(profile._id) ?? 0),
   })));
@@ -217,7 +217,7 @@ export async function getRequests(now = new Date()): Promise<Listing<RequestRow>
   }));
 }
 
-export type ShipmentScope = "active" | "attention" | "all";
+export type ShipmentScope = "active" | "attention" | "completed" | "all";
 export type TimelineStep = { label: string; at?: Date };
 export type ShipmentRow = {
   id: string; ref: string; status: string; tone: Tone; attention?: string;
@@ -259,10 +259,10 @@ function timeline(shipment: Shipment, now: Date): TimelineStep[] {
 export async function getShipments(scope: ShipmentScope, now = new Date()): Promise<Listing<ShipmentRow>> {
   const { db } = await database();
   const c = collections(db);
-  const overdue = scope === "active" ? [] : await overdueIds(db, now);
+  const overdue = scope === "attention" || scope === "all" ? await overdueIds(db, now) : [];
   const filter = scope === "active" ? activeShipments(now)
-    : scope === "attention" ? { $or: [halfConfirmed, { _id: { $in: overdue } }] } : {};
-  const shipments = await c.shipments.find(filter).sort({ createdAt: -1 }).limit(listLimit + 1).toArray();
+    : scope === "completed" ? { state: "completed" as const } : scope === "attention" ? { $or: [halfConfirmed, { _id: { $in: overdue } }] } : {};
+  const shipments = await c.shipments.find(filter).sort(scope === "completed" ? { completedAt: -1 } : { createdAt: -1 }).limit(listLimit + 1).toArray();
   const [requests, trips, person] = await Promise.all([
     c.requests.find({ _id: { $in: shipments.map(({ requestId }) => requestId) } }).toArray(),
     c.trips.find({ _id: { $in: shipments.map(({ tripId }) => tripId) } }).toArray(),
@@ -322,7 +322,7 @@ export function sampleUsers({ role, q }: { role?: UserRole; q?: string }, now = 
     { ...farai, name: farai.name!, roles: ["trucker", "shipper"], company: "Dube Transport", registration: "ACD 1180", lastMessageAt: ago(now, 7), trips: 3, shipments: 5 },
     { ...chipo, name: chipo.name!, roles: ["shipper"], lastMessageAt: ago(now, 30), trips: 0, shipments: 2 },
     { ...tatenda, name: tatenda.name!, roles: ["trucker"], company: "Banda Logistics", registration: "AEZ 7702", lastMessageAt: ago(now, 52), trips: 2, shipments: 1 },
-    { ...nyasha, name: nyasha.name!, roles: ["shipper"], trips: 0, shipments: 0 },
+    { ...nyasha, name: nyasha.name!, roles: ["shipper"], shipperAccess: { suspended: true, at: ago(now, 24), admin: "Demo admin", reason: "Account review" }, trips: 0, shipments: 0 },
   ];
   const search = q?.trim().toLowerCase();
   return listing(rows.filter((row) => (!role || row.roles.includes(role))
@@ -375,6 +375,6 @@ export function sampleShipments(scope: ShipmentScope, now = sampleNow()): Listin
       shipper: rudo, trucker: farai, priceCents: 4000, createdAt: ago(now, 40),
       timeline: [{ label: "Requested by shipper", at: ago(now, 40) }, { label: "Offer made by trucker", at: ago(now, 39) }, { label: "Offer accepted", at: ago(now, 38) }, { label: "Cancelled by shipper", at: ago(now, 9) }] },
   ];
-  return listing(rows.filter((row) => scope === "all" || (scope === "attention" ? !!row.attention
+  return listing(rows.filter((row) => scope === "all" || (scope === "completed" ? row.status === "Completed" : scope === "attention" ? !!row.attention
     : ["Offer made", "Awaiting offer", "Booked", "Awaiting receiver", "Awaiting trucker", "Overdue"].includes(row.status))));
 }

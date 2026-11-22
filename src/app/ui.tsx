@@ -2,6 +2,7 @@ import type { ReactNode } from "react";
 import type { Listing, Person, Tone } from "../admin";
 import { demoMode } from "../admin";
 import { formatDeparture } from "../domain";
+import { requireDashboard } from "./session";
 import { logger } from "../logger";
 
 export const number = new Intl.NumberFormat("en");
@@ -11,6 +12,7 @@ export const shortDate = (date: string) =>
 
 /** Loads one page's data, or the sample data in development without a database. Logs and returns undefined on failure. */
 export async function load<T>(what: string, live: () => Promise<T>, sample: () => T): Promise<T | undefined> {
+  await requireDashboard();
   try {
     return demoMode() ? sample() : await live();
   } catch (error) {

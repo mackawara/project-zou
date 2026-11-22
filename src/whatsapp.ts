@@ -128,9 +128,12 @@ export async function markRead(messageId: string) {
 export async function sendWhatsApp(to: string, message: Message, inWindow: boolean) {
   const { WA_UPDATE_TEMPLATE, WA_TEMPLATE_LANGUAGE } = process.env;
   if (!graphConfigured()) throw new Error("WhatsApp sending is not configured");
-  if (!inWindow && !WA_UPDATE_TEMPLATE) return;
+  const template = WA_UPDATE_TEMPLATE?.trim();
+  if (!inWindow && !template) {
+    throw new Error("WhatsApp send failed: WA_UPDATE_TEMPLATE is required outside the customer-service window");
+  }
   const payload = inWindow ? messageBody(message) : {
-    type: "template", template: { name: WA_UPDATE_TEMPLATE, language: { code: WA_TEMPLATE_LANGUAGE || "en" } },
+    type: "template", template: { name: template, language: { code: WA_TEMPLATE_LANGUAGE || "en" } },
   };
   const res = await postMessages({ to, ...payload });
   if (!res.ok) {
@@ -139,4 +142,16 @@ export async function sendWhatsApp(to: string, message: Message, inWindow: boole
     if (code === 131047 && inWindow) return sendWhatsApp(to, message, false);
     throw new Error(`WhatsApp send failed (HTTP ${res.status}${code ? `, code ${code}` : ""})`, { cause: result?.error ?? result });
   }
+}
+
+export async function sendAdminCode(to: string, code: string) {
+  const name = process.env.WA_ADMIN_OTP_TEMPLATE?.trim();
+  if (!name || !graphConfigured()) throw new Error("WhatsApp admin authentication is not configured");
+  const parameters = [{ type: "text", text: code }];
+  const res = await postMessages({ to, type: "template", template: {
+    name, language: { code: process.env.WA_ADMIN_OTP_LANGUAGE || "en" },
+    components: [{ type: "body", parameters }, { type: "button", sub_type: "url", index: "0", parameters }],
+  } });
+  // Provider error bodies can echo authentication codes.
+  if (!res.ok) throw new Error(`WhatsApp authentication template failed (HTTP ${res.status})`);
 }

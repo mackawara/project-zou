@@ -1,9 +1,10 @@
 import type { Metadata } from "next";
-import { getUsers, sampleUsers, type UserRole } from "../../admin";
-import { Badge, Heading, More, PersonCell, Tabs, Unavailable, When, load, number } from "../ui";
+import { AccessForm } from "./access";
+import { demoMode, getUsers, sampleUsers, type UserRole } from "../../../admin";
+import { Badge, Heading, More, PersonCell, Tabs, Unavailable, When, load, number } from "../../ui";
 
 export const dynamic = "force-dynamic";
-export const metadata: Metadata = { title: "Users" };
+export const metadata: Metadata = { title: "Shippers and truckers" };
 
 const roles: { id?: UserRole; label: string }[] = [{ label: "All users" }, { id: "shipper", label: "Shippers" }, { id: "trucker", label: "Truckers" }];
 const roleLabel = { shipper: "Shipper", trucker: "Trucker" } as const;
@@ -16,7 +17,7 @@ export default async function Users({ searchParams }: { searchParams: Promise<{ 
   const href = (next: UserRole | undefined) => "/users?" + new URLSearchParams({ ...(next && { role: next }), ...(q && { q }) });
 
   return <>
-    <Heading title="Users" intro="Shippers who gave their name to book, and registered truckers.">
+    <Heading title="Shippers & truckers" intro="Shippers who gave their name to book, and registered truckers.">
       <Tabs label="Role" items={roles.map(({ id, label }) => ({ href: href(id), label, current: id === role }))} />
     </Heading>
     <form className="search" action="/users" role="search">
@@ -24,13 +25,13 @@ export default async function Users({ searchParams }: { searchParams: Promise<{ 
       <label htmlFor="q" className="sr-only">Search users</label>
       <input id="q" name="q" type="search" defaultValue={q} placeholder="Name, number, company or vehicle" maxLength={80} />
       <button type="submit">Search</button>
-      {q && <a href={href(role)}>Clear</a>}
+      {q && <a href={role ? "/users?role=" + role : "/users"}>Clear</a>}
     </form>
     {data ? <section className="panel">
       {data.rows.length ? <div className="table-scroll"><table className="data">
         <thead><tr>
           <th scope="col">User</th><th scope="col">Role</th><th scope="col">Company and vehicle</th>
-          <th scope="col" className="num">Adverts</th><th scope="col" className="num">Shipments</th><th scope="col">Last message</th>
+          <th scope="col" className="num">Adverts</th><th scope="col" className="num">Shipments</th><th scope="col">Last message</th><th scope="col">Shipper account</th>
         </tr></thead>
         <tbody>{data.rows.map((user) => <tr key={user.phone}>
           <th scope="row"><PersonCell person={{ phone: user.phone, name: user.name }} /></th>
@@ -39,6 +40,12 @@ export default async function Users({ searchParams }: { searchParams: Promise<{ 
           <td className="num">{number.format(user.trips)}</td>
           <td className="num">{number.format(user.shipments)}</td>
           <td><When at={user.lastMessageAt} /></td>
+          <td>{user.roles.includes("shipper") ? <div className="account-cell">
+            <Badge tone={user.shipperAccess?.suspended ? "warn" : "ok"}>{user.shipperAccess?.suspended ? "Suspended" : "Active"}</Badge>
+            {user.shipperAccess && <small>{user.shipperAccess.reason} · <When at={user.shipperAccess.at} /></small>}
+            <a className="text-link" href={`/payments?shipper=${user.phone}`}>Record payment</a>
+            <AccessForm phone={user.phone} suspended={!!user.shipperAccess?.suspended} demo={demoMode()} />
+          </div> : "—"}</td>
         </tr>)}</tbody>
       </table></div> : <p className="empty">{q ? "No users match this search." : "No users yet."}</p>}
       <More listing={data} />
