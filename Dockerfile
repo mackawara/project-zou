@@ -19,6 +19,7 @@ RUN npm ci --omit=dev && npm cache clean --force
 COPY --from=build --chown=node:node /app/.next ./.next
 COPY next.config.ts tsconfig.json ./
 COPY src ./src
+COPY public ./public
 USER node
 EXPOSE 3000
 CMD ["node_modules/.bin/next", "start"]

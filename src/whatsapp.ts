@@ -25,16 +25,30 @@ const envelope = z.object({
   })) })),
 });
 
+export type WebhookMessage = z.infer<typeof inbound>;
+export type WebhookPayload = z.infer<typeof envelope>;
+
 export function authentic(raw: Buffer, signature: string, secret: string) {
   return sameSecret(signature, "sha256=" + createHmac("sha256", secret).update(raw).digest("hex"));
 }
 
+// True when the payload names business numbers and none of them is ours, so we can drop it without work.
+export function foreignOnly(payload: unknown, phoneId: string) {
+  const parsed = envelope.safeParse(payload);
+  if (!parsed.success) return false;
+  const ids = parsed.data.entry.flatMap(({ changes }) => changes.map(({ value }) => value.metadata?.phone_number_id))
+    .filter((id): id is string => id !== undefined);
+  return ids.length > 0 && ids.every((id) => id !== phoneId);
+}
+
 export function eventsFrom(payload: unknown, phoneId: string, now = new Date()): Event[] {
+  if (!phoneId.trim()) return [];
   const parsed = envelope.safeParse(payload);
   if (!parsed.success) return [];
   const events: Event[] = [];
   for (const entry of parsed.data.entry) {
     for (const { field, value } of entry.changes) {
+      // Match the receiving business number, not the customer's sender number.
       if (field !== "messages" || value.metadata?.phone_number_id !== phoneId) continue;
       for (const input of value.messages ?? []) {
         const item = inbound.safeParse(input);
@@ -87,23 +101,57 @@ function messageBody(message: Message) {
   }
 }
 
-export async function sendWhatsApp(to: string, message: Message, inWindow: boolean) {
-  const { WA_GRAPH_VERSION, WA_PHONE_NUMBER_ID, WA_ACCESS_TOKEN, WA_UPDATE_TEMPLATE, WA_TEMPLATE_LANGUAGE } = process.env;
-  if (!WA_GRAPH_VERSION || !/^v\d+\.\d+$/.test(WA_GRAPH_VERSION) || !WA_PHONE_NUMBER_ID || !WA_ACCESS_TOKEN) {
-    throw new Error("WhatsApp sending is not configured");
-  }
-  if (!inWindow && !WA_UPDATE_TEMPLATE) return;
-  const payload = inWindow ? messageBody(message) : {
-    type: "template", template: { name: WA_UPDATE_TEMPLATE, language: { code: WA_TEMPLATE_LANGUAGE || "en" } },
-  };
-  const res = await fetch(`https://graph.facebook.com/${WA_GRAPH_VERSION}/${WA_PHONE_NUMBER_ID}/messages`, {
+function graphConfigured() {
+  const { WA_GRAPH_VERSION, WA_PHONE_NUMBER_ID, WA_ACCESS_TOKEN } = process.env;
+  return !!WA_GRAPH_VERSION && /^v\d+\.\d+$/.test(WA_GRAPH_VERSION) && !!WA_PHONE_NUMBER_ID && !!WA_ACCESS_TOKEN;
+}
+
+function postMessages(body: Record<string, unknown>) {
+  const { WA_GRAPH_VERSION, WA_PHONE_NUMBER_ID, WA_ACCESS_TOKEN } = process.env;
+  return fetch(`https://graph.facebook.com/${WA_GRAPH_VERSION}/${WA_PHONE_NUMBER_ID?.trim()}/messages`, {
     method: "POST", headers: { authorization: `Bearer ${WA_ACCESS_TOKEN}`, "content-type": "application/json" },
-    signal: AbortSignal.timeout(8000), body: JSON.stringify({ messaging_product: "whatsapp", to, ...payload }),
+    signal: AbortSignal.timeout(8000), body: JSON.stringify({ messaging_product: "whatsapp", ...body }),
   });
+}
+
+/** Marks an incoming message as read, so the sender sees blue ticks once it has been handled. */
+export async function markRead(messageId: string) {
+  if (!graphConfigured()) return;
+  const res = await postMessages({ status: "read", message_id: messageId });
+  if (!res.ok) {
+    const result = await res.json().catch(() => null);
+    // The Graph API error body is kept as the cause, so development logs show Meta's explanation.
+    throw new Error(`WhatsApp read receipt failed (HTTP ${res.status})`, { cause: result?.error ?? result });
+  }
+}
+
+export async function sendWhatsApp(to: string, message: Message, inWindow: boolean) {
+  const { WA_UPDATE_TEMPLATE, WA_TEMPLATE_LANGUAGE } = process.env;
+  if (!graphConfigured()) throw new Error("WhatsApp sending is not configured");
+  const template = WA_UPDATE_TEMPLATE?.trim();
+  if (!inWindow && !template) {
+    throw new Error("WhatsApp send failed: WA_UPDATE_TEMPLATE is required outside the customer-service window");
+  }
+  const payload = inWindow ? messageBody(message) : {
+    type: "template", template: { name: template, language: { code: WA_TEMPLATE_LANGUAGE || "en" } },
+  };
+  const res = await postMessages({ to, ...payload });
   if (!res.ok) {
     const result = await res.json().catch(() => null);
     const code = Number(result?.error?.code);
     if (code === 131047 && inWindow) return sendWhatsApp(to, message, false);
-    throw new Error(`WhatsApp send failed (HTTP ${res.status}${code ? `, code ${code}` : ""})`);
+    throw new Error(`WhatsApp send failed (HTTP ${res.status}${code ? `, code ${code}` : ""})`, { cause: result?.error ?? result });
   }
+}
+
+export async function sendAdminCode(to: string, code: string) {
+  const name = process.env.WA_ADMIN_OTP_TEMPLATE?.trim();
+  if (!name || !graphConfigured()) throw new Error("WhatsApp admin authentication is not configured");
+  const parameters = [{ type: "text", text: code }];
+  const res = await postMessages({ to, type: "template", template: {
+    name, language: { code: process.env.WA_ADMIN_OTP_LANGUAGE || "en" },
+    components: [{ type: "body", parameters }, { type: "button", sub_type: "url", index: "0", parameters }],
+  } });
+  // Provider error bodies can echo authentication codes.
+  if (!res.ok) throw new Error(`WhatsApp authentication template failed (HTTP ${res.status})`);
 }

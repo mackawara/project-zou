@@ -1,9 +1,9 @@
 import { randomUUID } from "node:crypto";
 import type { ClientSession, Db } from "mongodb";
-import { collections, type Action, type Event, type FlowName, type FlowTicket, type Message } from "./db";
+import { collections, type Action, type Event, type FlowName, type FlowTicket, type Message, type PendingInput } from "./db";
 import {
-  capacityForm, dateAllowed, dateWindow, dollars, findMatches, formatDeparture, hour, isActive,
-  offerForm, recordDelivery, requestForm, shipperForm, tripForm, truckerForm,
+  capacityForm, dateAllowed, dateWindow, day, dollars, findMatches, formatDeparture, hour, isActive,
+  localDate, localMidnight, matchWindowDays, offerForm, recordDelivery, requestForm, shipperForm, tripFits, tripForm, truckerForm,
   type Shipment, type TransportRequest, type Trip, type TripDetails,
 } from "./domain";
 import { guideButtons, guides, helpCommands, menu, overview, welcome, type Guide } from "./guide";
@@ -17,6 +17,7 @@ export const actions = {
 const help = { id: "help", title: "How it works" };
 const menuAction = { id: "menu", title: "Main menu" };
 const capacity = (kg: number) => `${kg / 1000} t`;
+const loadDetails = (r: TransportRequest) => `${r.pickup} → ${r.dropoff} · ${capacity(r.weight)} of ${r.cargo} · ready ${r.date}`;
 const reference = (shipment: Shipment) => shipment._id.slice(0, 8).toUpperCase();
 
 export class Workflow {
@@ -33,11 +34,15 @@ export class Workflow {
     this.from = event.from;
   }
 
-  private async send(to: string, message: Message) {
-    await this.c.outbox.insertOne({
+  private outboxItem(to: string, message: Message, matchShipper?: string) {
+    return {
       _id: `${this.event.id}:${this.outgoing++}`, to, message, attempts: 0, nextAt: this.now,
-      expiresAt: new Date(this.now.getTime() + 48 * hour),
-    }, this.options);
+      expiresAt: new Date(this.now.getTime() + 48 * hour), ...(matchShipper && { matchShipper }),
+    };
+  }
+
+  private async send(to: string, message: Message) {
+    await this.c.outbox.insertOne(this.outboxItem(to, message), this.options);
   }
 
   private say(body: string, to = this.from) {
@@ -56,17 +61,39 @@ export class Workflow {
     await this.send(this.from, { kind: "flow", body, flow, token });
   }
 
+  private async prompt(input: PendingInput["input"], body: string, data: PendingInput["data"]) {
+    await this.c.inputs.replaceOne({ _id: this.from }, {
+      input, data, expiresAt: new Date(this.now.getTime() + hour),
+    }, { ...this.options, upsert: true });
+    return this.say(body + "\nReply MENU to leave this step.");
+  }
+
   async handle() {
     const { kind, value, at } = this.event;
     const contact = await this.c.contacts.updateOne({ _id: this.from }, {
       $max: { lastIncomingAt: at, expiresAt: new Date(at.getTime() + 48 * hour) },
     }, { ...this.options, upsert: true });
+    const text = value.trim();
+    const command = text.toLowerCase();
+    // Navigation replaces the current reply context so later text cannot edit an old load.
+    const showHelp = kind === "text" && helpCommands.includes(command);
+    if (kind !== "text" || showHelp || /^(menu|cancel|find a truck|advertise space|my activity)$/.test(command) || /^received /i.test(text)) {
+      await this.c.inputs.deleteOne({ _id: this.from }, this.options);
+    } else {
+      const pending = await this.c.inputs.findOne({ _id: this.from }, this.options);
+      if (pending) {
+        if (pending.expiresAt <= this.now) {
+          await this.c.inputs.deleteOne({ _id: this.from }, this.options);
+          return this.choose("That reply step has expired. Open the item again from My activity.", [actions.activity]);
+        }
+        return this.submitInput(pending, text);
+      }
+    }
     if (kind === "flow") return this.submit(value);
     if (kind === "action") return this.click(value);
-    if (/^received /i.test(value)) return this.receiveAsGuest(value.slice(9).trim());
-    const text = value.trim().toLowerCase();
-    if (helpCommands.includes(text)) return this.help();
-    switch (text) {
+    if (/^received /i.test(text)) return this.receiveAsGuest(text.slice(9).trim());
+    if (showHelp) return this.help();
+    switch (command) {
       case "find a truck": return this.click("search");
       case "advertise space": return this.click("trip");
       case "my activity": return this.activity();
@@ -88,6 +115,53 @@ export class Workflow {
     return this.choose(overview, guideButtons);
   }
 
+  private async blockedShipper(phone: string, serialize = false) {
+    const query = { _id: phone, shipper: { $exists: true } };
+    // A write orders a new booking/search against an admin changing this role in another transaction.
+    const profile = serialize
+      ? await this.c.profiles.findOneAndUpdate(query, { $inc: { shipperRevision: 1 } }, this.options)
+      : await this.c.profiles.findOne(query, this.options);
+    return profile?.shipperAccess?.suspended === true;
+  }
+
+  private suspensionNotice() {
+    return this.choose("Your shipper account is suspended. Contact Zunde about reinstatement. You can manage existing deliveries in My activity.", [actions.activity]);
+  }
+
+  private async submitInput(pending: PendingInput, value: string) {
+    const { input, data } = pending;
+    switch (input) {
+      case "shipper": {
+        if (await this.blockedShipper(this.from, true)) return this.suspensionNotice();
+        const parsed = shipperForm.safeParse({ name: value });
+        if (!parsed.success) return this.say("Enter your name using 1 to 80 characters, or reply MENU to leave this step.");
+        await this.c.inputs.deleteOne({ _id: this.from }, this.options);
+        await this.c.profiles.updateOne({ _id: this.from }, { $set: { "shipper.name": parsed.data.name } }, { ...this.options, upsert: true });
+        if (data.requestId && data.tripId) return this.select(data.requestId, data.tripId);
+        return this.activity();
+      }
+      case "offer": {
+        const parsed = offerForm.safeParse({ price: value });
+        if (!parsed.success) return this.say("Enter a total price in USD from 0.01 to 999999.99, for example 80.25. Use up to two decimal places, or reply MENU to leave this step.");
+        await this.c.inputs.deleteOne({ _id: this.from }, this.options);
+        if (data.shipmentId) return this.postOffer(data.shipmentId, parsed.data.price);
+        return this.activity();
+      }
+      case "capacity": {
+        const parsed = capacityForm.safeParse({ capacity: value });
+        if (!parsed.success) return this.say("Enter 0 or a number from 0.1 to 40 tonnes, using up to one decimal place, or reply MENU to leave this step.");
+        await this.c.inputs.deleteOne({ _id: this.from }, this.options);
+        const previous = await this.c.trips.findOneAndUpdate({
+          _id: data.tripId, trucker: this.from, closedAt: { $exists: false }, departureAt: { $gt: this.now },
+        }, { $set: { capacity: parsed.data.capacity } }, { ...this.options, returnDocument: "before" });
+        if (!previous) return this.say("This advert is no longer active.");
+        const body = `Advert updated. Available space: ${capacity(parsed.data.capacity)}.`;
+        if (parsed.data.capacity <= previous.capacity) return this.say(body);
+        return this.announceSpace({ ...previous, capacity: parsed.data.capacity }, body, previous.capacity);
+      }
+    }
+  }
+
   private async submit(raw: string) {
     let result: Record<string, unknown>;
     try {
@@ -103,6 +177,7 @@ export class Workflow {
     const data = ticket.data;
     switch (ticket.flow) {
       case "search": {
+        if (await this.blockedShipper(this.from, true)) return this.suspensionNotice();
         const parsed = requestForm.safeParse(result);
         if (!parsed.success || !dateAllowed(parsed.data.date, this.now)) {
           return this.flow("search", "Choose different towns, a date within 30 days, and a weight from 0.1 to 40 tonnes.");
@@ -111,7 +186,8 @@ export class Workflow {
         await this.c.requests.insertOne(request, this.options);
         const { _id, pickup, dropoff, createdAt } = request;
         await this.c.searchMetrics.insertOne({ _id, pickup, dropoff, createdAt }, this.options);
-        return this.showMatches(request);
+        await this.synchronizeMatching(request.date, matchWindowDays + 1);
+        return this.showMatches(request, true);
       }
       case "trip": {
         const parsed = tripForm.safeParse(result);
@@ -122,13 +198,6 @@ export class Workflow {
         if (profile?.trucker) return this.publish(parsed.data);
         return this.flow("trucker", "Add your details once to publish this advert.", { draftTrip: parsed.data });
       }
-      case "shipper": {
-        const parsed = shipperForm.safeParse(result);
-        if (!parsed.success) return this.flow("shipper", "Enter your full name to continue.", data);
-        await this.c.profiles.updateOne({ _id: this.from }, { $set: { shipper: parsed.data } }, { ...this.options, upsert: true });
-        if (data?.requestId && data.tripId) return this.select(data.requestId, data.tripId);
-        return this.activity();
-      }
       case "trucker": {
         const parsed = truckerForm.safeParse(result);
         if (!parsed.success) return this.flow("trucker", "Check your details. Enter your ID in the format 63-1234567-F-42.", data);
@@ -137,20 +206,6 @@ export class Workflow {
           $set: { trucker: { ...trucker, nationalIdEncrypted: encryptId(nationalId) } },
         }, { ...this.options, upsert: true });
         return data?.draftTrip ? this.publish(data.draftTrip) : this.activity();
-      }
-      case "offer": {
-        const parsed = offerForm.safeParse(result);
-        if (!parsed.success) return this.flow("offer", "Enter the total price in USD, for example 80.00.", data);
-        if (data?.shipmentId) return this.postOffer(data.shipmentId, parsed.data.price);
-        return this.activity();
-      }
-      case "capacity": {
-        const parsed = capacityForm.safeParse(result);
-        if (!parsed.success) return this.flow("capacity", "Enter 0 or a number from 0.1 to 40 tonnes.", data);
-        const updated = await this.c.trips.updateOne({
-          _id: data?.tripId, trucker: this.from, closedAt: { $exists: false }, departureAt: { $gt: this.now },
-        }, { $set: { capacity: parsed.data.capacity } }, this.options);
-        return this.say(updated.matchedCount ? `Advert updated. Available space: ${capacity(parsed.data.capacity)}.` : "This advert is no longer active.");
       }
     }
   }
@@ -165,40 +220,105 @@ export class Workflow {
     const { date: _date, time: _time, ...details } = draft;
     const trip = { ...details, _id: randomUUID(), trucker: this.from, departureAt, createdAt: this.now };
     await this.c.trips.insertOne(trip, this.options);
-    return this.manageTrip(trip, `Advert posted. ${trip.origin} to ${trip.destination}, ${formatDeparture(trip.departureAt)}, ${capacity(trip.capacity)} available.`);
+    return this.announceSpace(trip, `Advert posted. ${trip.origin} to ${trip.destination}, ${formatDeparture(trip.departureAt)}, ${capacity(trip.capacity)} available.`);
   }
 
-  private async showMatches(request: TransportRequest) {
+  // Concurrent search and advert transactions would otherwise both read snapshots
+  // taken before the other's insert. Touch their shared departure day so MongoDB
+  // retries one transaction and the second posting sees the first.
+  private async synchronizeMatching(date: string, days: number) {
+    const start = localMidnight(date).getTime();
+    for (let i = 0; i < days; i++) {
+      const midnight = new Date(start + i * day);
+      await this.c.matchDays.updateOne({ _id: midnight }, {
+        $inc: { revision: 1 }, $setOnInsert: { expiresAt: new Date(midnight.getTime() + day) },
+      }, { ...this.options, upsert: true });
+    }
+  }
+
+  private async matchingLoads(trip: Trip) {
+    const requests = await this.c.requests.find({
+      shipper: { $ne: trip.trucker }, cancelledAt: { $exists: false },
+      $or: [{ expiresAt: { $exists: false } }, { expiresAt: { $gt: this.now } }],
+      date: { $gte: localDate(new Date(trip.departureAt.getTime() - matchWindowDays * day)), $lte: localDate(trip.departureAt) },
+      cargo: { $in: trip.acceptedCargo }, weight: { $lte: trip.capacity },
+    }, this.options).sort({ date: 1, createdAt: 1, _id: 1 }).toArray();
+    if (!requests.length) return [];
+    const suspended = await this.c.profiles.find({
+      _id: { $in: requests.map(r => r.shipper) }, "shipperAccess.suspended": true,
+    }, { ...this.options, projection: { _id: 1 } }).toArray();
+    const blocked = new Set(suspended.map(profile => profile._id));
+    const fits = requests.filter((r) => !blocked.has(r.shipper) && tripFits(r, trip, this.now));
+    const selections = fits.flatMap((r) => r.selectionId ? [r.selectionId] : []);
+    if (!selections.length) return fits;
+    const shipments = await this.c.shipments.find({ _id: { $in: selections } }, this.options).toArray();
+    const occupied = new Set(shipments.filter((s) => isActive(s, this.now)).map((s) => s._id));
+    return fits.filter((r) => !r.selectionId || !occupied.has(r.selectionId));
+  }
+
+  private async announceSpace(trip: Trip, body: string, previousCapacity = 0) {
+    await this.synchronizeMatching(localDate(trip.departureAt), 1);
+    const loads = await this.matchingLoads(trip);
+    await this.manageTrip(trip, body, loads);
+    const fresh = loads.filter((r) => r.weight > previousCapacity && !r.matchedTripIds?.includes(trip._id));
+    if (!fresh.length) return;
+    const ids = fresh.map((r) => r._id);
+    await this.c.requests.updateMany({ _id: { $in: ids } }, { $addToSet: { matchedTripIds: trip._id } }, this.options);
+    await this.c.searchMetrics.updateMany({ _id: { $in: ids }, matchedAt: { $exists: false } }, { $set: { matchedAt: this.now } }, this.options);
+    const alerts = fresh.map((request) => this.outboxItem(request.shipper, {
+      kind: "buttons",
+      body: `A truck now fits your load.\n${loadDetails(request)}\nTruck from ${trip.origin} to ${trip.destination}, ${formatDeparture(trip.departureAt)} · ${capacity(trip.capacity)} free.`,
+      actions: [
+        { id: `select:${request._id}:${trip._id}`, title: "Request a price" },
+        { id: `results:${request._id}`, title: "See available trucks" },
+      ],
+    }, request.shipper));
+    await this.c.outbox.insertMany(alerts, this.options);
+  }
+
+  private async showMatches(request: TransportRequest, newSearch = false) {
     const current = request.selectionId && await this.c.shipments.findOne({ _id: request.selectionId }, this.options);
     if (current && isActive(current, this.now)) return this.showShipment(current);
+    if (await this.blockedShipper(request.shipper)) return this.suspensionNotice();
     if (request.cancelledAt || dateWindow(request.date).end <= this.now) return this.choose("This search has ended.", [actions.search]);
     const { start, end } = dateWindow(request.date);
     const trips = await this.c.trips.find({
-      trucker: { $ne: this.from }, closedAt: { $exists: false },
+      trucker: { $ne: request.shipper }, closedAt: { $exists: false },
       departureAt: { $gte: start, $gt: this.now, $lt: end }, capacity: { $gte: request.weight }, acceptedCargo: request.cargo,
     }, this.options).toArray();
     const matches = findMatches(request, trips, this.now);
     if (!matches.length) {
-      return this.choose("No truck fits this load right now. Check again from My activity.", [
+      return this.choose("No truck fits this load right now. We'll look for new space until this search ends. You can check again from My activity.", [
         { id: `results:${request._id}`, title: "Check again" }, actions.search,
       ]);
     }
     await this.c.searchMetrics.updateOne({ _id: request._id, matchedAt: { $exists: false } }, { $set: { matchedAt: this.now } }, this.options);
-    return this.choose(`Available trucks for ${request.pickup} to ${request.dropoff}. Choose one to request a price.`, matches.map((trip, i) => ({
+    await this.choose(`Available trucks for ${request.pickup} to ${request.dropoff}. Choose one to request a price.`, matches.map((trip, i) => ({
       id: `select:${request._id}:${trip._id}`, title: `Truck ${i + 1} · ${capacity(trip.capacity)} free`,
       description: `${trip.origin} → ${trip.destination} · ${formatDeparture(trip.departureAt)}`,
     })));
+    if (!newSearch) return;
+    await this.c.requests.updateOne({ _id: request._id }, {
+      $addToSet: { matchedTripIds: { $each: matches.map((trip) => trip._id) } },
+    }, this.options);
+    for (const trucker of new Set(matches.map((trip) => trip.trucker))) {
+      await this.c.outbox.insertOne(this.outboxItem(trucker, { kind: "buttons",
+        body: `A shipper is looking for space: ${loadDetails(request)}. You'll receive a price request if they select your truck.`,
+        actions: [actions.activity],
+      }, request.shipper), this.options);
+    }
   }
 
   private async select(requestId: string, tripId: string) {
+    if (await this.blockedShipper(this.from, true)) return this.suspensionNotice();
     const request = await this.c.requests.findOne({ _id: requestId, shipper: this.from, cancelledAt: { $exists: false } }, this.options);
     const trip = await this.c.trips.findOne({ _id: tripId, trucker: { $ne: this.from } }, this.options);
     if (!request) return this.choose("This search has ended.", [actions.search]);
     const current = request.selectionId && await this.c.shipments.findOne({ _id: request.selectionId }, this.options);
     if (current && isActive(current, this.now)) return this.showShipment(current);
-    if (!trip || !findMatches(request, [trip], this.now).length) return this.showMatches(request);
+    if (!trip || !tripFits(request, trip, this.now)) return this.showMatches(request);
     const profile = await this.c.profiles.findOne({ _id: this.from }, this.options);
-    if (!profile?.shipper) return this.flow("shipper", "Add your name to request an offer. Your WhatsApp number is captured automatically.", { requestId, tripId });
+    if (!profile?.shipper) return this.prompt("shipper", "Reply with your name to request an offer. Zunde uses your name and WhatsApp number to arrange your shipment and send updates. Your number is shared with the trucker once you accept their offer.", { requestId, tripId });
     const shipment: Shipment = {
       _id: randomUUID(), requestId, tripId, shipper: this.from, trucker: trip.trucker, createdAt: this.now,
       replyBy: new Date(Math.min(this.now.getTime() + 2 * hour, trip.departureAt.getTime())), state: "requested",
@@ -222,8 +342,9 @@ export class Workflow {
     }
     const trip = await this.c.trips.findOne({ _id: shipment.tripId }, this.options);
     const request = await this.c.requests.findOne({ _id: shipment.requestId }, this.options);
-    if (!trip || !request || !findMatches(request, [trip], this.now).length) return this.say("Your advert no longer fits this load. Check the advertised space.");
-    const changes = { state: "offered", priceCents, replyBy: trip.departureAt } as const;
+    if (!trip || !request || !tripFits(request, trip, this.now)) return this.say("Your advert no longer fits this load. Check the advertised space.");
+    if (await this.blockedShipper(shipment.shipper, true)) return this.say("This shipper is currently unable to receive offers.");
+    const changes = { state: "offered", priceCents, offeredAt: this.now, replyBy: trip.departureAt } as const;
     await this.c.shipments.updateOne({ _id: id }, { $set: changes }, this.options);
     await this.say(`Offer sent for shipment ${reference(shipment)}.`);
     return this.showShipment({ ...shipment, ...changes }, shipment.shipper);
@@ -233,10 +354,11 @@ export class Workflow {
     if (shipment.shipper !== this.from || shipment.state !== "offered" || !isActive(shipment, this.now)) {
       return this.showShipment(shipment);
     }
+    if (await this.blockedShipper(this.from, true)) return this.suspensionNotice();
     const request = await this.c.requests.findOne({ _id: shipment.requestId, selectionId: shipment._id }, this.options);
     const trip = await this.c.trips.findOne({ _id: shipment.tripId }, this.options);
-    if (!trip || !request || !findMatches(request, [trip], this.now).length) {
-      await this.c.shipments.updateOne({ _id: shipment._id }, { $set: { state: "declined" } }, this.options);
+    if (!trip || !request || !tripFits(request, trip, this.now)) {
+      await this.c.shipments.updateOne({ _id: shipment._id }, { $set: { state: "declined", declinedAt: this.now } }, this.options);
       return this.choose("That truck is no longer available for this load.", [{ id: `results:${shipment.requestId}`, title: "Find another truck" }]);
     }
     // Serialize acceptance with trucker edits to this advert. Capacity stays trucker-managed.
@@ -250,7 +372,7 @@ export class Workflow {
   private closeSelection(shipment: Shipment, state: "cancelled" | "declined") {
     const changes = state === "cancelled"
       ? { state, cancelledAt: this.now, cancelledBy: this.from }
-      : { state };
+      : { state, declinedAt: this.now, declinedBy: this.from };
     return this.c.shipments.updateOne({ _id: shipment._id }, { $set: changes }, this.options);
   }
 
@@ -326,9 +448,14 @@ export class Workflow {
     return buttons.length ? this.choose(body, buttons, to) : this.say(body + "\nWaiting for the other party to confirm.", to);
   }
 
-  private manageTrip(trip: Trip, body: string) {
+  private manageTrip(trip: Trip, body: string, loads: TransportRequest[]) {
     if (trip.closedAt || trip.departureAt <= this.now) return this.say("This advert has ended.");
-    return this.choose(body, [{ id: `capacity:${trip._id}`, title: "Update space" }, { id: `close:${trip._id}`, title: "Close advert" }]);
+    const preview = loads.slice(0, 3).map(loadDetails);
+    if (loads.length > preview.length) preview.push(`and ${loads.length - preview.length} more`);
+    const summary = loads.length
+      ? `${loads.length} matching ${loads.length === 1 ? "load" : "loads"}:\n${preview.join("\n")}\nYou'll receive a price request if a shipper selects your truck.`
+      : "No open load matches this advert yet.";
+    return this.choose(body + "\n" + summary, [{ id: `capacity:${trip._id}`, title: "Update space" }, { id: `close:${trip._id}`, title: "Close advert" }]);
   }
 
   private async activity() {
@@ -357,7 +484,7 @@ export class Workflow {
   private async click(value: string) {
     const [command, id, tripId] = value.split(":");
     switch (command) {
-      case "search": return this.flow("search", "Tell us what you need to move. You can search without registering.");
+      case "search": return await this.blockedShipper(this.from) ? this.suspensionNotice() : this.flow("search", "Tell us what you need to move. Submit your search to see trucks and receive WhatsApp updates when space becomes available for this load.");
       case "trip": return this.flow("trip", "List the spare space on your planned trip.");
       case "activity": return this.activity();
       case "menu": return this.menu();
@@ -372,12 +499,12 @@ export class Workflow {
       case "close": {
         const trip = await this.c.trips.findOne({ _id: id, trucker: this.from }, this.options);
         if (!trip || trip.closedAt || trip.departureAt <= this.now) return this.say("This advert is no longer active.");
-        if (command === "capacity") return this.flow("capacity", "Enter the space still available for future shipments.", { tripId: id });
+        if (command === "capacity") return this.prompt("capacity", `Reply with the space still available for ${trip.origin} to ${trip.destination}, ${formatDeparture(trip.departureAt)}, in tonnes (e.g. 2.5). Enter 0 to hide this trip from search results.`, { tripId: id });
         if (command === "close") {
           await this.c.trips.updateOne({ _id: id }, { $set: { closedAt: this.now } }, this.options);
           return this.say("Advert closed. Confirmed shipments remain in My activity.");
         }
-        return this.manageTrip(trip, `${trip.origin} to ${trip.destination} · ${formatDeparture(trip.departureAt)} · ${capacity(trip.capacity)} free`);
+        return this.manageTrip(trip, `${trip.origin} to ${trip.destination} · ${formatDeparture(trip.departureAt)} · ${capacity(trip.capacity)} free`, await this.matchingLoads(trip));
       }
     }
     const shipment = id && await this.getShipment(id);
@@ -387,7 +514,7 @@ export class Workflow {
       case "shipment": return this.showShipment(shipment);
       case "offer":
         if (!shipper && shipment.state === "requested" && isActive(shipment, this.now)) {
-          return this.flow("offer", "Enter a total price for this load. Send the offer only if you have space.", { shipmentId: id });
+          return this.prompt("offer", `Reply with your total price in USD for shipment ${reference(shipment)} (e.g. 80.25). Send the offer only if you have space.`, { shipmentId: id });
         }
         break;
       case "accept": if (shipper) return this.accept(shipment); break;

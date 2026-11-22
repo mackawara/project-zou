@@ -1,40 +1,27 @@
 import type { CSSProperties } from "react";
-import { getAnalytics, sampleAnalytics, type Analytics, type Period } from "../analytics";
-import { formatDeparture } from "../domain";
+import type { Metadata } from "next";
+import { getAnalytics, sampleAnalytics, type Analytics, type Period } from "../../../analytics";
+import { formatDeparture } from "../../../domain";
+import { Heading, Tabs, Unavailable, load, number } from "../../ui";
 
 export const dynamic = "force-dynamic";
+export const metadata: Metadata = { title: "Reports" };
+
 const periods: { id: Period; label: string }[] = [
   { id: "7", label: "7 days" }, { id: "30", label: "30 days" }, { id: "all", label: "All time" },
 ];
-const number = new Intl.NumberFormat("en");
 const dateLabel = (date: string) => new Intl.DateTimeFormat("en-GB", { day: "numeric", month: "short", timeZone: "UTC" }).format(new Date(date));
 
-export default async function Dashboard({ searchParams }: { searchParams: Promise<{ period?: string }> }) {
+export default async function Reports({ searchParams }: { searchParams: Promise<{ period?: string }> }) {
   const chosen = (await searchParams).period;
   const period = chosen === "30" || chosen === "all" ? chosen : "7";
-  const demo = !process.env.MONGODB_URI && process.env.NODE_ENV === "development";
-  let data: Analytics | undefined;
-  try { data = demo ? sampleAnalytics(period) : await getAnalytics(period); }
-  catch { console.error("Dashboard could not load analytics"); }
+  const data = await load("analytics", () => getAnalytics(period), () => sampleAnalytics(period));
 
   return <>
-    <header className="top">
-      <div className="top-content">
-        <div className="brand"><span className="mark" aria-hidden="true">Z</span> Zunde</div>
-        <span className="environment"><span />{demo ? "Demo data" : "Pilot operations"}</span>
-      </div>
-    </header>
-    <main>
-      <div className="heading">
-        <div><h1>Pilot analytics</h1><p>Freight activity along the Harare–Victoria Falls corridor.</p></div>
-        <nav aria-label="Reporting period" className="periods">
-          {periods.map(({ id, label }) => <a key={id} href={`/?period=${id}`} aria-current={id === period ? "page" : undefined}>{label}</a>)}
-        </nav>
-      </div>
-      {data ? <Overview data={data} period={period} /> :
-        <p className="panel unavailable">Analytics are temporarily unavailable. Refresh after checking the database connection.</p>}
-      <footer><span>Zunde</span><span>All times shown in Zimbabwe local time</span></footer>
-    </main>
+    <Heading title="Pilot analytics" intro="Freight activity along the Harare–Victoria Falls corridor.">
+      <Tabs label="Reporting period" items={periods.map(({ id, label }) => ({ href: `/reports?period=${id}`, label, current: id === period }))} />
+    </Heading>
+    {data ? <Overview data={data} period={period} /> : <Unavailable what="Analytics" />}
   </>;
 }
 

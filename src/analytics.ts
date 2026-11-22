@@ -7,19 +7,20 @@ type RouteCount = { pickup: string; dropoff: string; requests: number; matched: 
 type Activity = { ref: string; label: string; at: Date };
 export type Analytics = {
   requests: number; trips: number; matched: number; confirmed: number; completed: number; cancelled: number;
-  routes: RouteCount[]; days: { date: string; requests: number; trips: number }[]; activity: Activity[];
+  routes: RouteCount[]; days: { date: string; requests: number; trips: number; completed: number }[]; activity: Activity[];
 };
 
 const day = 24 * hour;
 const startDate = (now: Date, days: number) => new Date(localMidnight(localDate(now)).getTime() - (days - 1) * day);
 
-function chart(now: Date, days: number, requests: DayCount[], trips: DayCount[]) {
+function chart(now: Date, days: number, requests: DayCount[], trips: DayCount[], completions: DayCount[]) {
   const start = startDate(now, days).getTime();
   const requestCounts = new Map(requests.map((row) => [row._id, row.count]));
   const tripCounts = new Map(trips.map((row) => [row._id, row.count]));
+  const completedCounts = new Map(completions.map(row => [row._id, row.count]));
   return Array.from({ length: days }, (_, offset) => {
     const date = localDate(new Date(start + offset * day));
-    return { date, requests: requestCounts.get(date) || 0, trips: tripCounts.get(date) || 0 };
+    return { date, requests: requestCounts.get(date) || 0, trips: tripCounts.get(date) || 0, completed: completedCounts.get(date) || 0 };
   });
 }
 
@@ -29,11 +30,11 @@ export async function getAnalytics(period: Period, now = new Date()): Promise<An
   const dateFilter = period === "all" ? {} : { createdAt: { $gte: startDate(now, Number(period)) } };
   const events = (field: string) => ({ [field]: period === "all" ? { $exists: true } : { $gte: startDate(now, Number(period)) } });
   const days = period === "7" ? 7 : 30;
-  const dayPipeline = [
-    { $match: { createdAt: { $gte: startDate(now, days) } } },
-    { $group: { _id: { $dateToString: { format: "%Y-%m-%d", date: "$createdAt", timezone: timeZone } }, count: { $sum: 1 } } },
+  const dayPipeline = (field: "createdAt" | "completedAt") => [
+    { $match: { [field]: { $gte: startDate(now, days) } } },
+    { $group: { _id: { $dateToString: { format: "%Y-%m-%d", date: "$" + field, timezone: timeZone } }, count: { $sum: 1 } } },
   ];
-  const [requests, trips, matched, confirmed, completed, cancelled, routes, requestDays, tripDays, activity] = await Promise.all([
+  const [requests, trips, matched, confirmed, completed, cancelled, routes, requestDays, tripDays, completionDays, activity] = await Promise.all([
     c.searchMetrics.countDocuments(dateFilter),
     c.trips.countDocuments(dateFilter),
     c.searchMetrics.countDocuments({ ...dateFilter, matchedAt: { $exists: true } }),
@@ -48,8 +49,9 @@ export async function getAnalytics(period: Period, now = new Date()): Promise<An
       { $limit: 6 },
       { $project: { _id: 0, pickup: "$_id.pickup", dropoff: "$_id.dropoff", requests: 1, matched: 1 } },
     ]).toArray(),
-    c.searchMetrics.aggregate<DayCount>(dayPipeline).toArray(),
-    c.trips.aggregate<DayCount>(dayPipeline).toArray(),
+    c.searchMetrics.aggregate<DayCount>(dayPipeline("createdAt")).toArray(),
+    c.trips.aggregate<DayCount>(dayPipeline("createdAt")).toArray(),
+    c.shipments.aggregate<DayCount>(dayPipeline("completedAt")).toArray(),
     c.shipments.aggregate<Activity>([
       { $match: { $or: [events("confirmedAt"), events("completedAt"), events("cancelledAt")] } },
       { $project: { ref: { $substr: ["$_id", 0, 8] }, updates: [
@@ -64,7 +66,7 @@ export async function getAnalytics(period: Period, now = new Date()): Promise<An
       { $project: { _id: 0, ref: 1, label: "$updates.label", at: "$updates.at" } },
     ]).toArray(),
   ]);
-  return { requests, trips, matched, confirmed, completed, cancelled, routes, days: chart(now, days, requestDays, tripDays), activity };
+  return { requests, trips, matched, confirmed, completed, cancelled, routes, days: chart(now, days, requestDays, tripDays, completionDays), activity };
 }
 
 export function sampleAnalytics(period: Period, now = new Date()): Analytics {
@@ -75,6 +77,7 @@ export function sampleAnalytics(period: Period, now = new Date()): Analytics {
     _id: localDate(new Date(start + i * day)), count: recent[i % 7],
   }));
   const trips = requests.map(({ _id, count }, i) => ({ _id, count: Math.max(1, Math.round(count * 0.55) + (i % 3) - 1) }));
+  const completions = requests.map(({ _id }, i) => ({ _id, count: [1, 3, 2, 3, 2, 5, 2][i % 7] }));
   const total = requests.reduce((sum, item) => sum + item.count, 0);
   const recentRoutes = [
     ["Harare", "Bulawayo", 19, 15], ["Gweru", "Bulawayo", 13, 10],
@@ -84,11 +87,11 @@ export function sampleAnalytics(period: Period, now = new Date()): Analytics {
   const scale = total / 58;
   return {
     requests: total, trips: trips.reduce((sum, item) => sum + item.count, 0),
-    matched: Math.round(43 * scale), confirmed: Math.round(26 * scale), completed: Math.round(18 * scale), cancelled: Math.round(3 * scale),
+    matched: Math.round(43 * scale), confirmed: Math.round(26 * scale), completed: completions.reduce((sum, row) => sum + row.count, 0), cancelled: Math.round(3 * scale),
     routes: recentRoutes.map(([pickup, dropoff, requests, matched]) => ({
       pickup, dropoff, requests: Math.round(requests * scale), matched: Math.round(matched * scale),
     })),
-    days: chart(now, days, requests, trips),
+    days: chart(now, days, requests, trips, completions),
     activity: [
       { ref: "4b291ca2", label: "Delivery completed", at: new Date(now.getTime() - hour) },
       { ref: "db5c9301", label: "Offer accepted", at: new Date(now.getTime() - 2 * hour) },

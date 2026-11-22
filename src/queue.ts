@@ -1,15 +1,20 @@
 import type { Db, MongoClient } from "mongodb";
 import { collections } from "./db";
 import { hour } from "./domain";
+import { logger } from "./logger";
 import { Workflow } from "./workflow";
 import { sendWhatsApp } from "./whatsapp";
 
 const retries = 6;
 const retryAt = (attempts: number, now: Date) => new Date(now.getTime() + 1000 * 2 ** attempts);
 
-export async function processIncoming(db: Db, client: MongoClient, now = new Date()) {
+const replyIds = (eventId: string) => new RegExp("^" + eventId.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + ":");
+
+/** Handles the next due inbox event, or the event with `id` straight away, as the webhook does. */
+export async function processIncoming(db: Db, client: MongoClient, now = new Date(), id?: string) {
   const { inbox } = collections(db);
-  const item = await inbox.findOne({ nextAt: { $lte: now }, event: { $exists: true }, failed: { $ne: true } }, { sort: { nextAt: 1, _id: 1 } });
+  const due = id === undefined ? { nextAt: { $lte: now } } : { _id: id };
+  const item = await inbox.findOne({ ...due, event: { $exists: true }, failed: { $ne: true } }, { sort: { nextAt: 1, _id: 1 } });
   if (!item?.event) return false;
   try {
     await client.withSession((session) => session.withTransaction(async () => {
@@ -18,37 +23,42 @@ export async function processIncoming(db: Db, client: MongoClient, now = new Dat
       await new Workflow(db, session, pending.event, now).handle();
       await inbox.updateOne({ _id: item._id }, { $unset: { event: "" } }, { session });
     }));
-  } catch {
+  } catch (error) {
     const failed = item.attempts + 1 >= retries;
     await inbox.updateOne({ _id: item._id, event: { $exists: true }, attempts: item.attempts }, {
       $inc: { attempts: 1 }, $set: { nextAt: retryAt(item.attempts, now), failed },
       ...(failed && { $unset: { event: "" } }),
     });
-    console.error(failed ? "Incoming message failed permanently" : "Incoming message will retry");
+    logger.error(`${failed ? "Incoming message failed permanently" : "Incoming message will retry"}: ${item._id}`, error);
   }
   return true;
 }
 
-export async function processOutgoing(db: Db, deliver = sendWhatsApp, now = new Date()) {
-  const { outbox, contacts } = collections(db);
+/** Sends the next due outgoing message, limited to replies to `eventId` when given. */
+export async function processOutgoing(db: Db, deliver = sendWhatsApp, now = new Date(), eventId?: string) {
+  const { outbox, contacts, profiles } = collections(db);
   const item = await outbox.findOneAndUpdate(
-    { nextAt: { $lte: now }, message: { $exists: true }, failed: { $ne: true } },
+    { ...(eventId !== undefined && { _id: replyIds(eventId) }), nextAt: { $lte: now }, message: { $exists: true }, failed: { $ne: true } },
     { $set: { nextAt: new Date(now.getTime() + 30_000) } },
     { sort: { nextAt: 1, _id: 1 }, returnDocument: "after" },
   );
   if (!item?.message || !item.to) return false;
   try {
+    if (item.matchShipper && await profiles.findOne({ _id: item.matchShipper, "shipperAccess.suspended": true }, { projection: { _id: 1 } })) {
+      await outbox.updateOne({ _id: item._id }, { $unset: { to: "", message: "", matchShipper: "" } });
+      return true;
+    }
     const contact = await contacts.findOne({ _id: item.to });
     const inWindow = !!contact && now.getTime() - contact.lastIncomingAt.getTime() < 24 * hour;
     await deliver(item.to, item.message, inWindow);
-    await outbox.updateOne({ _id: item._id }, { $unset: { to: "", message: "" } });
+    await outbox.updateOne({ _id: item._id }, { $unset: { to: "", message: "", matchShipper: "" } });
   } catch (error) {
     const failed = item.attempts + 1 >= retries;
     await outbox.updateOne({ _id: item._id }, {
       $inc: { attempts: 1 }, $set: { nextAt: retryAt(item.attempts, now), failed },
-      ...(failed && { $unset: { to: "", message: "" } }),
+      ...(failed && { $unset: { to: "", message: "", matchShipper: "" } }),
     });
-    console.error(error instanceof Error && error.message.startsWith("WhatsApp send failed") ? error.message : "Outgoing message could not be sent");
+    logger.error(`${error instanceof Error && error.message.startsWith("WhatsApp send failed") ? error.message : "Outgoing message could not be sent"}: ${item._id}`, error);
   }
   return true;
 }
