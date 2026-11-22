@@ -6,6 +6,7 @@ import {
   localDate, localMidnight, matchWindowDays, offerForm, recordDelivery, requestForm, shipperForm, tripFits, tripForm, truckerForm,
   type Shipment, type TransportRequest, type Trip, type TripDetails,
 } from "./domain";
+import { guideButtons, guides, helpCommands, menu, overview, welcome, type Guide } from "./guide";
 import { encryptId, receiptToken, sameSecret } from "./secrets";
 
 export const actions = {
@@ -13,6 +14,8 @@ export const actions = {
   trip: { id: "trip", title: "Advertise space" },
   activity: { id: "activity", title: "My activity" },
 };
+const help = { id: "help", title: "How it works" };
+const menuAction = { id: "menu", title: "Main menu" };
 const capacity = (kg: number) => `${kg / 1000} t`;
 const loadDetails = (r: TransportRequest) => `${r.pickup} → ${r.dropoff} · ${capacity(r.weight)} of ${r.cargo} · ready ${r.date}`;
 const reference = (shipment: Shipment) => shipment._id.slice(0, 8).toUpperCase();
@@ -67,13 +70,14 @@ export class Workflow {
 
   async handle() {
     const { kind, value, at } = this.event;
-    await this.c.contacts.updateOne({ _id: this.from }, {
+    const contact = await this.c.contacts.updateOne({ _id: this.from }, {
       $max: { lastIncomingAt: at, expiresAt: new Date(at.getTime() + 48 * hour) },
     }, { ...this.options, upsert: true });
     const text = value.trim();
     const command = text.toLowerCase();
     // Navigation replaces the current reply context so later text cannot edit an old load.
-    if (kind !== "text" || /^(menu|cancel|find a truck|advertise space|my activity)$/.test(command) || /^received /i.test(text)) {
+    const showHelp = kind === "text" && helpCommands.includes(command);
+    if (kind !== "text" || showHelp || /^(menu|cancel|find a truck|advertise space|my activity)$/.test(command) || /^received /i.test(text)) {
       await this.c.inputs.deleteOne({ _id: this.from }, this.options);
     } else {
       const pending = await this.c.inputs.findOne({ _id: this.from }, this.options);
@@ -88,12 +92,27 @@ export class Workflow {
     if (kind === "flow") return this.submit(value);
     if (kind === "action") return this.click(value);
     if (/^received /i.test(text)) return this.receiveAsGuest(text.slice(9).trim());
+    if (showHelp) return this.help();
     switch (command) {
       case "find a truck": return this.click("search");
       case "advertise space": return this.click("trip");
       case "my activity": return this.activity();
-      default: return this.choose("Welcome to Zunde. What would you like to do?", Object.values(actions));
     }
+    // Explain the service to people who have not used it yet: no profile and no recent messages.
+    const newcomer = contact.upsertedCount > 0 && !await this.c.profiles.findOne({ _id: this.from }, this.options);
+    return this.menu(newcomer);
+  }
+
+  private menu(newcomer = false) {
+    return this.choose(newcomer ? welcome : menu, Object.values(actions));
+  }
+
+  private help(guide?: string) {
+    if (guide && guide in guides) {
+      const start = { shipper: [actions.search], trucker: [actions.trip], receiver: [] }[guide as Guide];
+      return this.choose(guides[guide as Guide], [...start, help, menuAction]);
+    }
+    return this.choose(overview, guideButtons);
   }
 
   private async blockedShipper(phone: string, serialize = false) {
@@ -445,7 +464,7 @@ export class Workflow {
       .sort({ departureAt: 1 }).limit(10).toArray();
     const shipments = await this.c.shipments.find({ $or: [{ trucker: this.from }, { shipper: this.from }] }, this.options)
       .sort({ createdAt: -1 }).limit(10).toArray();
-    if (!requests.length && !trips.length && !shipments.length) return this.choose("Your searches and adverts will appear here.", [actions.search, actions.trip]);
+    if (!requests.length && !trips.length && !shipments.length) return this.choose("Your searches and adverts will appear here.", [actions.search, actions.trip, help]);
     const entries: Action[] = [
       ...requests.map((r) => ({ id: `results:${r._id}`, title: "Search · " + r.date, description: `${r.pickup} → ${r.dropoff}` })),
       ...shipments.map((s) => ({ id: `shipment:${s._id}`, title: `Shipment ${reference(s)}`, description: isActive(s, this.now) ? s.state : "Closed or expired" })),
@@ -468,6 +487,8 @@ export class Workflow {
       case "search": return await this.blockedShipper(this.from) ? this.suspensionNotice() : this.flow("search", "Tell us what you need to move. Submit your search to see trucks and receive WhatsApp updates when space becomes available for this load.");
       case "trip": return this.flow("trip", "List the spare space on your planned trip.");
       case "activity": return this.activity();
+      case "menu": return this.menu();
+      case "help": return this.help(id);
       case "results": {
         const request = await this.c.requests.findOne({ _id: id, shipper: this.from }, this.options);
         return request ? this.showMatches(request) : this.choose("This search has ended.", [actions.search]);

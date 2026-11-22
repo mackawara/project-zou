@@ -4,6 +4,8 @@ Zunde matches shippers with spare truck capacity through WhatsApp. The Next.js s
 
 ## Pilot workflow
 
+New users who message Zunde for the first time get a short explanation of the service with the main menu. Anyone can reply **HELP** for an overview and short guides for shippers, truckers and receivers. The text lives in `src/guide.ts`.
+
 1. The shipper opens **Find a truck** and submits pickup, destination, ready date, cargo type and weight. No registration is needed to see results. Searches can be reopened from **My activity**.
 2. The trucker uses **Advertise space** to submit a route, departure, available tonnes and cargo types. On the first advert, Zunde asks for name, national ID, truck registration and company name. Completing that form unlocks posting and receiving requests. Staff do not review documents in the pilot.
 3. The matcher returns up to ten future departures that cover the route in the right direction, leave on the ready date or next two calendar days in Zimbabwe, accept the cargo, and list enough space. It sorts by departure. The initial corridor runs Harare → Kwekwe → Gweru → Bulawayo → Hwange → Victoria Falls and supports both directions. When a trucker posts an advert, the confirmation shows how many open loads fit and previews up to three. Each matching shipper gets a **Request a price** action for that truck. Increasing space checks for newly eligible loads. When the search comes second, each trucker listed in the initial results gets one load alert. Reopening a search or advert shows current matches.
@@ -48,11 +50,25 @@ Open [the local dashboard](http://localhost:3000). Development without a databas
 
 1. Generate the three Flow definitions with `npm run flows`: `search.json`, `trip.json` and `trucker.json` in `dist/whatsapp-flows/`. Import each into the pilot's WhatsApp Business Account, validate the forms in WhatsApp Manager, and publish them. Record each Flow ID in its matching `WA_FLOW_*` setting. The forms use the same town and cargo lists as the matcher. Shipper name, offer price and capacity updates need no Flow IDs.
 2. Set the Meta app secret, phone number ID, access token, verify token and the Graph API version enabled for the app. Set `WA_BUSINESS_NUMBER` to the WhatsApp business number in international digits, with no plus sign, so recipients receive a tappable receipt link.
-3. Serve the Next.js app over HTTPS and subscribe the Meta app to `messages` on `https://<your-host>/whatsapp/hook`. This endpoint handles both GET verification and incoming POST messages. Set `WA_PHONE_NUMBER_ID` to the receiving business phone number ID. Only messages whose `metadata.phone_number_id` exactly matches this ID are handled; messages for other numbers or without that metadata are acknowledged and ignored. Run `npm run worker` alongside it to retry messages or replies that failed in the webhook. The worker creates MongoDB indexes at startup. For self-hosting, run `npm run build` and `npm start`, and supervise the worker and web process with the server's process manager.
+3. Serve the Next.js app over HTTPS and subscribe the Meta app to `messages` on `https://<your-host>/whatsapp/hook`. Both this URL and the existing `/api/whatsapp/webhook` handle GET verification and incoming POST messages. Set `WA_PHONE_NUMBER_ID` to the receiving business phone number ID. Only messages whose `metadata.phone_number_id` exactly matches this ID are handled; messages for other numbers or without that metadata are acknowledged and ignored. Run `npm run worker` alongside it to retry messages or replies that failed in the webhook. The worker creates MongoDB indexes at startup. For self-hosting, run `npm run build` and `npm start`, and supervise the worker and web process with the server's process manager.
 4. For notifications to people outside WhatsApp's customer-service window, set `WA_UPDATE_TEMPLATE` and `WA_TEMPLATE_LANGUAGE` to an approved utility template with no variables and its language. The template should direct the recipient to reply MENU and open **My activity**. Send it only to opted-in pilot participants. If the template is missing, sending fails and the worker retries. Exhausted retries appear on the dashboard. Participants can also reopen the search or advert from **My activity**.
 5. Test with separate pilot WhatsApp numbers for a shipper, trucker and receiver. Use synthetic identity details until the test accounts and Flow configurations are verified.
 
 The webhook checks `x-hub-signature-256` against an HMAC-SHA256 of the raw request body using `WA_APP_SECRET` before parsing or saving events. Missing, invalid or mismatched signatures return 401. It then handles only messages addressed to `WA_PHONE_NUMBER_ID`; both checks must pass before a message can be handled. Missing app secret or phone number ID returns 503. As in the ISP bot, the webhook handles each message before it responds: it skips message IDs it has already received, runs the conversation step, sends the replies and marks the message read. Handling errors are logged and still acknowledged with 200; the webhook returns 503 so Meta retries only when the inbox cannot be written. MongoDB transactions commit business changes, message processing and outgoing messages together. If handling or a send fails part-way, the worker retries it. Outside production, errors are logged in full: stack, cause and every property, including MongoDB and Graph API error responses. With `NODE_ENV=production`, set for `next start` and needed for the worker, only the error name and code are logged, because those messages can quote personal data. Keep the database key and credentials in the server environment. Back up the key securely alongside the database because it protects trucker IDs and signs receipt links.
+
+## Deploy to an Oracle VM
+
+`.github/workflows/deploy.yml` runs on pushes to `main` and `staging` (or manually). It typechecks, tests and builds, pushes a `linux/arm64` image to Docker Hub tagged with the commit SHA and branch, then deploys it over SSH with `docker compose`. One image runs both the web server and the worker.
+
+One-time VM setup:
+
+1. Install Docker with the Compose plugin and let the SSH user run `docker`.
+2. Create `~/repos/zunde/.env` from `.env.example` with the production values. The workflow copies `docker-compose.yml` beside it and keeps `IMAGE` and `IMAGE_TAG` in that file up to date.
+3. The web server listens on `127.0.0.1:3000`. Set `PORT` in `.env` to use another port. Put an HTTPS reverse proxy such as nginx or Caddy in front of it for the Meta webhook.
+
+Repository secrets: `DOCKERHUB_USERNAME`, `DOCKERHUB_PASSWORD` (an access token), `ORACLE_VM_URL`, `SSH_USER` and `SSH_PRIVATE_KEY`.
+
+A deploy succeeds when the webhook answers and the worker stays up without restarting for 15 seconds. Otherwise the workflow prints recent logs and restarts the previous image.
 
 ## Checks
 
