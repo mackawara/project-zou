@@ -133,9 +133,23 @@ export function dateProblem(date: string, now: Date, label = "date") {
   if (date > max) return `The ${label} ${shortDate(date)} is too far ahead. Choose a date up to ${shortDate(max)} (${bookingWindowDays} days from today).`;
 }
 
+/** Departures from `matchWindowDays` before to `matchWindowDays` after `date`, as whole local days. */
 export function dateWindow(date: string) {
-  const start = localMidnight(date);
-  return { start, end: new Date(start.getTime() + (matchWindowDays + 1) * day) };
+  const midnight = localMidnight(date).getTime();
+  return { start: new Date(midnight - matchWindowDays * day), end: new Date(midnight + (matchWindowDays + 1) * day) };
+}
+
+/** Whole local days from `date` to the departure day: negative when the truck leaves earlier. */
+export function daysFromDate(date: string, departureAt: Date) {
+  return Math.round((localMidnight(localDate(departureAt)).getTime() - localMidnight(date).getTime()) / day);
+}
+
+/** "2 days before your date", "1 day after your date", or "" on the same day. */
+export function dayOffset(date: string, departureAt: Date) {
+  const offset = daysFromDate(date, departureAt);
+  if (!offset) return "";
+  const days = Math.abs(offset);
+  return `${days} day${days === 1 ? "" : "s"} ${offset < 0 ? "before" : "after"} your date`;
 }
 
 export function tripFits(request: RequestDetails, trip: Trip, now: Date) {
@@ -153,8 +167,11 @@ export function tripFits(request: RequestDetails, trip: Trip, now: Date) {
 }
 
 export function findMatches(request: RequestDetails, trips: Trip[], now: Date) {
+  // Closest to the requested day first, so early or late trucks never crowd out same-day ones.
+  const distance = (trip: Trip) => Math.abs(daysFromDate(request.date, trip.departureAt));
   return trips.filter((trip) => tripFits(request, trip, now))
-    .sort((a, b) => a.departureAt.getTime() - b.departureAt.getTime() || a._id.localeCompare(b._id)).slice(0, 10);
+    .sort((a, b) => distance(a) - distance(b) || a.departureAt.getTime() - b.departureAt.getTime() || a._id.localeCompare(b._id))
+    .slice(0, 10);
 }
 
 export function isActive(shipment: Shipment, now: Date) {

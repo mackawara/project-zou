@@ -30,6 +30,9 @@ test("concurrent postings find each other and only alert eligible waiting loads"
       { ...base, _id: "overweight", weight: 1001 },
       { ...base, _id: "wrong-cargo", cargo: "Machinery" },
       { ...base, _id: "outside-window", date: localDate(now) },
+      // Loads ready after the truck leaves still match within the window.
+      { ...base, _id: "later-load", shipper: "later-load", date: localDate(new Date(localMidnight(departureDate).getTime() + 2 * day)) },
+      { ...base, _id: "too-late-load", date: localDate(new Date(localMidnight(departureDate).getTime() + 3 * day)) },
       { ...base, _id: "expired-search", expiresAt: now },
       { ...base, _id: "cancelled-search", cancelledAt: now },
       { ...base, _id: "selected", selectionId: "current" },
@@ -69,10 +72,10 @@ test("concurrent postings find each other and only alert eligible waiting loads"
     const outgoing = await c.outbox.find().toArray();
     assert.equal(outgoing.filter(({ to, message }) => to === shipper && message && "actions" in message && message.actions.some((a) => a.id === select)).length, 1);
     const existingLoadAlerts = outgoing.filter(({ to }) => to !== trucker && to !== shipper);
-    assert.deepEqual(existingLoadAlerts.map(({ to }) => to).sort(), [...waiting.map((r) => r.shipper), "reopened"].sort());
+    assert.deepEqual(existingLoadAlerts.map(({ to }) => to).sort(), [...waiting.map((r) => r.shipper), "reopened", "later-load"].sort());
     // The concurrent shipper is either in the advert confirmation or announced by the later search.
     const notices = outgoing.filter(({ to }) => to === trucker).map(({ message }) => message!.body);
-    assert.equal(notices.filter((body) => /13 matching loads|A shipper is looking/.test(body)).length, 1);
+    assert.equal(notices.filter((body) => /14 matching loads|A shipper is looking/.test(body)).length, 1);
   } finally {
     await db.dropDatabase();
     await client.close();
