@@ -7,7 +7,9 @@ export type FlowName = typeof flowNames[number];
 export type Message =
   | { kind: "text"; body: string }
   | { kind: "buttons" | "list"; body: string; actions: Action[] }
-  | { kind: "flow"; body: string; flow: FlowName; token: string };
+  | { kind: "flow"; body: string; flow: FlowName; token: string; screen?: Record<string, string> }
+  // A "Share with receiver" button: `share` is forwarded together with a link that sends `command` to Zunde.
+  | { kind: "receipt"; body: string; share: string; command: string };
 export type Event = { id: string; from: string; at: Date } & (
   { kind: "text" | "action"; value: string } | { kind: "flow"; value: string }
 );

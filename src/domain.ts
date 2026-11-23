@@ -8,31 +8,83 @@ export const matchWindowDays = 2;
 export const hour = 3_600_000;
 export const day = 24 * hour;
 
-const town = z.enum(towns);
-const text = (max: number) => z.string().trim().min(1).max(max);
-const tonnes = z.string().trim().regex(/^\d{1,2}(\.\d)?$/).transform((value) => Math.round(Number(value) * 1000))
-  .pipe(z.number().int().min(100).max(40_000));
-export const shipperForm = z.object({ name: text(80) });
+export const bookingWindowDays = 30;
+export const maxTonnes = 40;
+
+const anyTown = z.enum(towns);
+const town = (label: string) => z.enum(towns, { error: `Choose the ${label} from the list.` });
+// `label` reads naturally after "Enter", e.g. "your name" or "the company name".
+const text = (label: string, max: number) => z.string({ error: `Enter ${label}.` }).trim()
+  .min(1, `Enter ${label}.`).max(max, `Shorten ${label} to ${max} characters or fewer.`);
+const date = (label: string) => z.iso.date({ error: `Choose the ${label} from the calendar.` });
+const tonnesHint = `whole tonnes from 1 to ${maxTonnes}, for example 12`;
+// Whole tonnes only: decimals are rejected so capacity and loads compare cleanly.
+const tonnes = (label: string) => z.string({ error: `Enter the ${label} in ${tonnesHint}.` }).trim()
+  .regex(/^\d{1,2}$/, `Enter the ${label} in ${tonnesHint}. Decimals are not accepted.`)
+  .transform((value) => Number(value) * 1000)
+  .pipe(z.number().int().min(1000, `Enter the ${label} in ${tonnesHint}.`).max(maxTonnes * 1000, `The ${label} can be at most ${maxTonnes} tonnes.`));
+const differentTowns = (from: string, to: string, message: string) => ({
+  message, path: [to],
+  // Run even when other fields fail, so every problem is reported in one reply.
+  when: ({ value }: { value: unknown }) => {
+    const v = value as Record<string, unknown> | undefined;
+    return anyTown.safeParse(v?.[from]).success && v?.[from] === v?.[to];
+  },
+});
+
+export const shipperForm = z.object({ name: text("your name", 80) });
 export const truckerForm = z.object({
-  name: text(80),
-  nationalId: z.string().trim().toUpperCase().regex(/^\d{2}[\s-]?\d{6,7}[\s-]?[A-Z][\s-]?\d{2}$/)
+  name: text("your full name", 80),
+  nationalId: z.string({ error: "Enter your national ID, for example 63-1234567-F-42." }).trim().toUpperCase()
+    .regex(/^\d{2}[\s-]?\d{6,7}[\s-]?[A-Z][\s-]?\d{2}$/, "Enter your national ID like 63-1234567-F-42: 2 digits, 6 or 7 digits, a letter, then 2 digits.")
     .transform((value) => value.replace(/[\s-]/g, "")),
-  registration: text(20).transform((value) => value.toUpperCase()).pipe(z.string().regex(/^[A-Z0-9 -]+$/)),
-  company: text(100),
+  registration: text("the truck registration", 20).transform((value) => value.toUpperCase())
+    .pipe(z.string().regex(/^[A-Z0-9 -]+$/, "Use only letters, numbers, spaces and dashes in the truck registration, for example ABC 1234.")),
+  company: text("the company name", 100),
 });
 export const requestForm = z.object({
-  pickup: town, dropoff: town, date: z.iso.date(), cargo: z.enum(cargo), weight: tonnes,
-  notes: z.string().trim().max(200).optional().default(""),
-}).refine(({ pickup, dropoff }) => pickup !== dropoff);
+  pickup: town("pickup town"), dropoff: town("drop-off town"), date: date("date the load is ready"),
+  cargo: z.enum(cargo, { error: "Choose the cargo type from the list." }), weight: tonnes("weight"),
+  notes: z.string().trim().max(200, "Shorten the handling notes to 200 characters or fewer.").optional().default(""),
+}).refine(({ pickup, dropoff }) => pickup !== dropoff,
+  differentTowns("pickup", "dropoff", "Pickup and drop-off are the same town. Choose a different drop-off town."));
 export const tripForm = z.object({
-  origin: town, destination: town, date: z.iso.date(), time: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/),
-  capacity: tonnes, acceptedCargo: z.array(z.enum(cargo)).min(1).max(cargo.length),
-}).refine(({ origin, destination }) => origin !== destination);
-export const capacityForm = z.object({ capacity: z.union([z.literal("0").transform(() => 0), tonnes]) });
+  origin: town("origin"), destination: town("destination"), date: date("departure date"),
+  time: z.string({ error: "Enter the departure time in 24-hour format, for example 07:30." }).trim()
+    .regex(/^([01]\d|2[0-3]):[0-5]\d$/, "Enter the departure time in 24-hour format with a colon, for example 07:30 or 16:45."),
+  capacity: tonnes("space"),
+  acceptedCargo: z.array(z.enum(cargo), { error: "Tick at least one cargo type you can carry." })
+    .min(1, "Tick at least one cargo type you can carry.").max(cargo.length),
+}).refine(({ origin, destination }) => origin !== destination,
+  differentTowns("origin", "destination", "Origin and destination are the same town. Choose a different destination."));
+export const capacityForm = z.object({ capacity: z.union([z.literal("0").transform(() => 0), tonnes("space")]) });
 export const offerForm = z.object({
   price: z.string().trim().regex(/^\d{1,6}(\.\d{1,2})?$/)
     .transform((value) => Math.round(Number(value) * 100)).pipe(z.number().int().positive()),
 });
+
+/** One line per problem, in form order, for a reply that tells the user exactly what to fix. */
+export function formProblems(error: z.ZodError) {
+  return [...new Set(error.issues.map((issue) => issue.message))];
+}
+
+/** Parses a submitted form and collects every problem, including a date outside the bookable window. */
+export function checkForm<S extends z.ZodType>(schema: S, input: unknown, now: Date, dateLabel?: string) {
+  const parsed = schema.safeParse(input);
+  const problems = parsed.success ? [] : formProblems(parsed.error);
+  const date = (input as Record<string, unknown> | null)?.date;
+  if (dateLabel && typeof date === "string" && z.iso.date().safeParse(date).success) {
+    const problem = dateProblem(date, now, dateLabel);
+    if (problem) problems.push(problem);
+  }
+  return parsed.success && !problems.length
+    ? { ok: true as const, data: parsed.data as z.output<S> }
+    : { ok: false as const, problems };
+}
+
+export function fixList(problems: string[]) {
+  return `Please fix ${problems.length === 1 ? "this" : "these"} and submit the form again:\n${problems.map((p) => `• ${p}`).join("\n")}`;
+}
 
 export type RequestDetails = z.output<typeof requestForm>;
 export type TripDetails = z.output<typeof tripForm>;
@@ -61,10 +113,24 @@ export function localMidnight(date: string) {
   return new Date(`${date}T00:00:00+02:00`);
 }
 
+/** The first and last dates a form may use, as YYYY-MM-DD in Harare time (for the Flow date pickers). */
+export function dateRange(now: Date) {
+  return { min: localDate(now), max: localDate(new Date(localMidnight(localDate(now)).getTime() + bookingWindowDays * day)) };
+}
+
 export function dateAllowed(date: string, now: Date) {
-  const value = localMidnight(date).getTime();
-  const today = localMidnight(localDate(now)).getTime();
-  return value >= today && value <= today + 30 * day;
+  const { min, max } = dateRange(now);
+  return date >= min && date <= max;
+}
+
+const shortDate = (date: string) => new Intl.DateTimeFormat("en-GB", { timeZone, weekday: "short", day: "numeric", month: "short" })
+  .format(new Date(`${date}T12:00:00+02:00`));
+
+/** A specific explanation when a date is outside the bookable window, otherwise undefined. */
+export function dateProblem(date: string, now: Date, label = "date") {
+  const { min, max } = dateRange(now);
+  if (date < min) return `The ${label} ${shortDate(date)} has passed. Choose today (${shortDate(min)}) or later.`;
+  if (date > max) return `The ${label} ${shortDate(date)} is too far ahead. Choose a date up to ${shortDate(max)} (${bookingWindowDays} days from today).`;
 }
 
 export function dateWindow(date: string) {
