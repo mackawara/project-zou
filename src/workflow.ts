@@ -2,8 +2,8 @@ import { randomUUID } from "node:crypto";
 import type { ClientSession, Db } from "mongodb";
 import { collections, type Action, type Event, type FlowName, type FlowTicket, type Message, type PendingInput } from "./db";
 import {
-  capacityForm, dateAllowed, dateWindow, day, dollars, findMatches, formatDeparture, hour, isActive,
-  localDate, localMidnight, matchWindowDays, offerForm, recordDelivery, requestForm, shipperForm, tripFits, tripForm, truckerForm,
+  capacityForm, checkForm, dateRange, dateWindow, day, dollars, findMatches, formatDeparture, hour, isActive,
+  fixList, localDate, localMidnight, matchWindowDays, maxTonnes, offerForm, recordDelivery, requestForm, shipperForm, tripFits, tripForm, truckerForm,
   type Shipment, type TransportRequest, type Trip, type TripDetails,
 } from "./domain";
 import { guideButtons, guides, helpCommands, menu, overview, welcome, type Guide } from "./guide";
@@ -58,7 +58,10 @@ export class Workflow {
     await this.c.tickets.insertOne({
       _id: token, owner: this.from, flow, data, expiresAt: new Date(this.now.getTime() + hour),
     }, this.options);
-    await this.send(this.from, { kind: "flow", body, flow, token });
+    // Date pickers only offer days a submission can use: today up to the booking window.
+    const { min, max } = dateRange(this.now);
+    const screen = flow === "trucker" ? undefined : { min_date: min, max_date: max };
+    await this.send(this.from, { kind: "flow", body, flow, token, ...(screen && { screen }) });
   }
 
   private async prompt(input: PendingInput["input"], body: string, data: PendingInput["data"]) {
@@ -134,7 +137,7 @@ export class Workflow {
       case "shipper": {
         if (await this.blockedShipper(this.from, true)) return this.suspensionNotice();
         const parsed = shipperForm.safeParse({ name: value });
-        if (!parsed.success) return this.say("Enter your name using 1 to 80 characters, or reply MENU to leave this step.");
+        if (!parsed.success) return this.say("Enter your name in 1 to 80 characters, for example Tendai Moyo, or reply MENU to leave this step.");
         await this.c.inputs.deleteOne({ _id: this.from }, this.options);
         await this.c.profiles.updateOne({ _id: this.from }, { $set: { "shipper.name": parsed.data.name } }, { ...this.options, upsert: true });
         if (data.requestId && data.tripId) return this.select(data.requestId, data.tripId);
@@ -142,14 +145,14 @@ export class Workflow {
       }
       case "offer": {
         const parsed = offerForm.safeParse({ price: value });
-        if (!parsed.success) return this.say("Enter a total price in USD from 0.01 to 999999.99, for example 80.25. Use up to two decimal places, or reply MENU to leave this step.");
+        if (!parsed.success) return this.say("Enter the total price in US dollars using numbers only, for example 80 or 80.25 (no $ sign, up to two decimal places). Reply MENU to leave this step.");
         await this.c.inputs.deleteOne({ _id: this.from }, this.options);
         if (data.shipmentId) return this.postOffer(data.shipmentId, parsed.data.price);
         return this.activity();
       }
       case "capacity": {
         const parsed = capacityForm.safeParse({ capacity: value });
-        if (!parsed.success) return this.say("Enter 0 or a number from 0.1 to 40 tonnes, using up to one decimal place, or reply MENU to leave this step.");
+        if (!parsed.success) return this.say(`Enter the space as whole tonnes from 1 to ${maxTonnes}, for example 12 (decimals are not accepted), or 0 to hide this trip. Reply MENU to leave this step.`);
         await this.c.inputs.deleteOne({ _id: this.from }, this.options);
         const previous = await this.c.trips.findOneAndUpdate({
           _id: data.tripId, trucker: this.from, closedAt: { $exists: false }, departureAt: { $gt: this.now },
@@ -178,10 +181,8 @@ export class Workflow {
     switch (ticket.flow) {
       case "search": {
         if (await this.blockedShipper(this.from, true)) return this.suspensionNotice();
-        const parsed = requestForm.safeParse(result);
-        if (!parsed.success || !dateAllowed(parsed.data.date, this.now)) {
-          return this.flow("search", "Choose different towns, a date within 30 days, and a weight from 0.1 to 40 tonnes.");
-        }
+        const parsed = checkForm(requestForm, result, this.now, "load date");
+        if (!parsed.ok) return this.flow("search", fixList(parsed.problems));
         const request = { ...parsed.data, _id: randomUUID(), shipper: this.from, createdAt: this.now, expiresAt: dateWindow(parsed.data.date).end };
         await this.c.requests.insertOne(request, this.options);
         const { _id, pickup, dropoff, createdAt } = request;
@@ -190,17 +191,16 @@ export class Workflow {
         return this.showMatches(request, true);
       }
       case "trip": {
-        const parsed = tripForm.safeParse(result);
-        if (!parsed.success || !dateAllowed(parsed.data.date, this.now) || this.departure(parsed.data) <= this.now) {
-          return this.flow("trip", "Choose different towns, a future departure within 30 days, and space from 0.1 to 40 tonnes.");
-        }
+        const parsed = checkForm(tripForm, result, this.now, "departure date");
+        if (!parsed.ok) return this.flow("trip", fixList(parsed.problems));
+        if (this.departure(parsed.data) <= this.now) return this.flow("trip", this.departurePassed(parsed.data));
         const profile = await this.c.profiles.findOne({ _id: this.from }, this.options);
         if (profile?.trucker) return this.publish(parsed.data);
         return this.flow("trucker", "Add your details once to publish this advert.", { draftTrip: parsed.data });
       }
       case "trucker": {
-        const parsed = truckerForm.safeParse(result);
-        if (!parsed.success) return this.flow("trucker", "Check your details. Enter your ID in the format 63-1234567-F-42.", data);
+        const parsed = checkForm(truckerForm, result, this.now);
+        if (!parsed.ok) return this.flow("trucker", fixList(parsed.problems), data);
         const { nationalId, ...trucker } = parsed.data;
         await this.c.profiles.updateOne({ _id: this.from }, {
           $set: { trucker: { ...trucker, nationalIdEncrypted: encryptId(nationalId) } },
@@ -214,9 +214,13 @@ export class Workflow {
     return new Date(`${trip.date}T${trip.time}:00+02:00`);
   }
 
+  private departurePassed(trip: TripDetails) {
+    return fixList([`The departure ${formatDeparture(this.departure(trip))} has already passed. Enter a later time or choose another day.`]);
+  }
+
   private async publish(draft: TripDetails) {
     const departureAt = this.departure(draft);
-    if (departureAt <= this.now) return this.flow("trip", "That departure has passed. Enter a new departure time.");
+    if (departureAt <= this.now) return this.flow("trip", this.departurePassed(draft));
     const { date: _date, time: _time, ...details } = draft;
     const trip = { ...details, _id: randomUUID(), trucker: this.from, departureAt, createdAt: this.now };
     await this.c.trips.insertOne(trip, this.options);
@@ -433,19 +437,21 @@ export class Workflow {
     let body = `Confirmed · ${ref}\n${load}\n${trip ? "Departure: " + formatDeparture(trip.departureAt) + "\n" : ""}Agreed price: ${amount}\n${shipper ? "Trucker" : "Shipper"}: +${contact}`;
     if (!shipper && request.notes) body += "\nHandling: " + request.notes;
     const buttons = [];
-    if (shipper && !shipment.receivedAt) {
-      const token = receiptToken(shipment._id);
-      const business = process.env.WA_BUSINESS_NUMBER;
-      const command = `received ${token}`;
-      body += business
-        ? `\nIf someone else receives the goods, forward this link for them to use after delivery:\nhttps://wa.me/${business}?text=${encodeURIComponent(command)}`
-        : `\nIf someone else receives the goods, ask them to send this to Zunde after delivery:\n${command}`;
-      buttons.push(action("received", "Confirm receipt"));
-    }
+    const shareReceipt = shipper && !shipment.receivedAt;
+    if (shareReceipt) buttons.push(action("received", "Confirm receipt"));
     if (!shipper && !shipment.deliveredAt) buttons.push(action("delivered", "Mark delivered"));
     if (!shipment.deliveredAt && !shipment.receivedAt) buttons.push(cancel);
     if (!shipper) buttons.push({ id: `capacity:${shipment.tripId}`, title: "Update space" });
-    return buttons.length ? this.choose(body, buttons, to) : this.say(body + "\nWaiting for the other party to confirm.", to);
+    if (buttons.length) await this.choose(body, buttons, to);
+    else await this.say(body + "\nWaiting for the other party to confirm.", to);
+    if (shareReceipt) {
+      // Sent after the summary so the share button is the last thing the shipper sees.
+      await this.send(to, {
+        kind: "receipt", command: `received ${receiptToken(shipment._id)}`,
+        body: `Is someone else receiving the goods for ${ref}? Tap Share with receiver and send the message to them. After delivery they tap the link inside and press send to confirm.\nIf you receive the goods yourself, tap Confirm receipt above instead.`,
+        share: `Zunde delivery ${ref}: ${load}.\nWhen the goods reach you, tap this link and press send in WhatsApp to confirm you received them:`,
+      });
+    }
   }
 
   private manageTrip(trip: Trip, body: string, loads: TransportRequest[]) {
@@ -499,7 +505,7 @@ export class Workflow {
       case "close": {
         const trip = await this.c.trips.findOne({ _id: id, trucker: this.from }, this.options);
         if (!trip || trip.closedAt || trip.departureAt <= this.now) return this.say("This advert is no longer active.");
-        if (command === "capacity") return this.prompt("capacity", `Reply with the space still available for ${trip.origin} to ${trip.destination}, ${formatDeparture(trip.departureAt)}, in tonnes (e.g. 2.5). Enter 0 to hide this trip from search results.`, { tripId: id });
+        if (command === "capacity") return this.prompt("capacity", `Reply with the space still available for ${trip.origin} to ${trip.destination}, ${formatDeparture(trip.departureAt)}, in whole tonnes (e.g. 12). Enter 0 to hide this trip from search results.`, { tripId: id });
         if (command === "close") {
           await this.c.trips.updateOne({ _id: id }, { $set: { closedAt: this.now } }, this.options);
           return this.say("Advert closed. Confirmed shipments remain in My activity.");
@@ -514,7 +520,7 @@ export class Workflow {
       case "shipment": return this.showShipment(shipment);
       case "offer":
         if (!shipper && shipment.state === "requested" && isActive(shipment, this.now)) {
-          return this.prompt("offer", `Reply with your total price in USD for shipment ${reference(shipment)} (e.g. 80.25). Send the offer only if you have space.`, { shipmentId: id });
+          return this.prompt("offer", `Reply with your total price in USD for shipment ${reference(shipment)} (numbers only, e.g. 80 or 80.25). Send the offer only if you have space.`, { shipmentId: id });
         }
         break;
       case "accept": if (shipper) return this.accept(shipment); break;

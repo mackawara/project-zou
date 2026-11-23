@@ -1,6 +1,7 @@
 import { createHmac } from "node:crypto";
 import { z } from "zod";
 import type { Event, Message } from "./db";
+import { logger } from "./logger";
 import { sameSecret } from "./secrets";
 
 const inbound = z.object({
@@ -66,7 +67,7 @@ export function eventsFrom(payload: unknown, phoneId: string, now = new Date()):
   return events;
 }
 
-function messageBody(message: Message) {
+function messageBody(message: Exclude<Message, { kind: "receipt" }>) {
   if (message.kind === "text") return { type: "text", text: { body: message.body, preview_url: false } };
   const body = { text: message.body };
   switch (message.kind) {
@@ -79,7 +80,7 @@ function messageBody(message: Message) {
           type: "flow", body,
           action: { name: "flow", parameters: {
             flow_message_version: "3", flow_id: id, flow_token: message.token,
-            flow_cta: "Open form", flow_action: "navigate", flow_action_payload: { screen: "FORM" },
+            flow_cta: "Open form", flow_action: "navigate", flow_action_payload: { screen: "FORM", ...(message.screen && { data: message.screen }) },
           } },
         },
       };
@@ -99,6 +100,46 @@ function messageBody(message: Message) {
       } },
     };
   }
+}
+
+let lookedUpNumber: string | undefined;
+
+/**
+ * Zunde's WhatsApp number in international digits, for wa.me links. Asked from Meta for the
+ * configured phone number ID, so a mistyped WA_BUSINESS_NUMBER (e.g. an account ID) cannot break links.
+ */
+export async function businessNumber() {
+  const configured = process.env.WA_BUSINESS_NUMBER?.replace(/\D/g, "");
+  if (lookedUpNumber) return lookedUpNumber;
+  if (graphConfigured()) {
+    const { WA_GRAPH_VERSION, WA_PHONE_NUMBER_ID, WA_ACCESS_TOKEN } = process.env;
+    try {
+      const res = await fetch(`https://graph.facebook.com/${WA_GRAPH_VERSION}/${WA_PHONE_NUMBER_ID?.trim()}?fields=display_phone_number`, {
+        headers: { authorization: `Bearer ${WA_ACCESS_TOKEN}` }, signal: AbortSignal.timeout(8000),
+      });
+      const digits = String((await res.json().catch(() => null))?.display_phone_number ?? "").replace(/\D/g, "");
+      if (res.ok && /^\d{8,15}$/.test(digits)) {
+        if (configured && configured !== digits) logger.warn("WA_BUSINESS_NUMBER does not match the WhatsApp number of WA_PHONE_NUMBER_ID; using the number from Meta");
+        return lookedUpNumber = digits;
+      }
+    } catch {
+      // Fall back to the configured number below.
+    }
+  }
+  return configured && /^\d{8,15}$/.test(configured) ? configured : undefined;
+}
+
+/** Turns a receipt share into a link button, or plain instructions when no business number is known. */
+async function receiptBody(message: Extract<Message, { kind: "receipt" }>) {
+  const number = await businessNumber();
+  if (!number) return messageBody({ kind: "text", body: `${message.body}\nAsk the receiver to send this to Zunde after delivery:\n${message.command}` });
+  const confirm = `https://wa.me/${number}?text=${encodeURIComponent(message.command)}`;
+  return {
+    type: "interactive",
+    interactive: { type: "cta_url", body: { text: message.body }, action: { name: "cta_url", parameters: {
+      display_text: "Share with receiver", url: `https://wa.me/?text=${encodeURIComponent(`${message.share}\n${confirm}`)}`,
+    } } },
+  };
 }
 
 function graphConfigured() {
@@ -132,9 +173,9 @@ export async function sendWhatsApp(to: string, message: Message, inWindow: boole
   if (!inWindow && !template) {
     throw new Error("WhatsApp send failed: WA_UPDATE_TEMPLATE is required outside the customer-service window");
   }
-  const payload = inWindow ? messageBody(message) : {
+  const payload = !inWindow ? {
     type: "template", template: { name: template, language: { code: WA_TEMPLATE_LANGUAGE || "en" } },
-  };
+  } : message.kind === "receipt" ? await receiptBody(message) : messageBody(message);
   const res = await postMessages({ to, ...payload });
   if (!res.ok) {
     const result = await res.json().catch(() => null);

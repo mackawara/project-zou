@@ -29,7 +29,7 @@ test("OTP uses the approved authentication template body and copy-code button", 
 
 test("admin sessions, ledger and role enforcement on the freight workflow", { skip: !process.env.TEST_MONGODB_URI }, async (t) => {
   process.env.MONGODB_URI = process.env.TEST_MONGODB_URI;
-  process.env.MONGODB_DB = "zunde_test_" + randomUUID().replaceAll("-", "");
+  process.env.MONGODB_DB = "zunde_test_" + randomUUID().replaceAll("-", "").slice(0, 20);
   process.env.ZUNDE_DATA_KEY = "ab".repeat(32);
   const { db, client } = await database();
   const c = collections(db);
@@ -121,6 +121,7 @@ test("admin sessions, ledger and role enforcement on the freight workflow", { sk
       assert.equal(await c.accessEvents.countDocuments({ shipper, admin }), 2);
     });
   } finally {
+    await db.dropDatabase();
     await client.close();
   }
 });

@@ -8,7 +8,7 @@ import { Workflow } from "../src/workflow";
 
 test("concurrent postings find each other and only alert eligible waiting loads", { skip: !process.env.TEST_MONGODB_URI }, async () => {
   const client = new MongoClient(process.env.TEST_MONGODB_URI!);
-  const db = client.db("zunde_test_" + randomUUID().replaceAll("-", ""));
+  const db = client.db("zunde_test_" + randomUUID().replaceAll("-", "").slice(0, 20));
   const c = collections(db);
   try {
     await ensureIndexes(db);
@@ -74,6 +74,7 @@ test("concurrent postings find each other and only alert eligible waiting loads"
     const notices = outgoing.filter(({ to }) => to === trucker).map(({ message }) => message!.body);
     assert.equal(notices.filter((body) => /13 matching loads|A shipper is looking/.test(body)).length, 1);
   } finally {
+    await db.dropDatabase();
     await client.close();
   }
 });

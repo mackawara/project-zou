@@ -129,7 +129,7 @@ test("out-of-window sends use the configured template or report the missing conf
 
 test("WhatsApp webhook to shipment completion, cancellation, and analytics", { skip: !process.env.TEST_MONGODB_URI }, async () => {
   process.env.MONGODB_URI = process.env.TEST_MONGODB_URI;
-  process.env.MONGODB_DB = "zunde_test_" + randomUUID().replaceAll("-", "");
+  process.env.MONGODB_DB = "zunde_test_" + randomUUID().replaceAll("-", "").slice(0, 20);
   process.env.ZUNDE_DATA_KEY = "42".repeat(32);
   const { db, client } = await database();
   try {
@@ -237,7 +237,7 @@ test("WhatsApp webhook to shipment completion, cancellation, and analytics", { s
     assert.equal(last(testTrucker).kind, "text");
     for (const invalid of ["free", "0", "-1", "80.255", "1000000"]) {
       await say(testTrucker, invalid);
-      assert.match(last(testTrucker).body, /Enter a total price in USD/);
+      assert.match(last(testTrucker).body, /Enter the total price in US dollars/);
       assert.equal(await c.shipments.countDocuments({ state: "offered" }), 0);
     }
     await say(testTrucker, " 80.25 ", "offer-price");
@@ -249,10 +249,13 @@ test("WhatsApp webhook to shipment completion, cancellation, and analytics", { s
     await click(testReceiver, accept);
     assert.equal(await c.shipments.countDocuments({ state: "offered" }), 1);
     await click(testShipper, accept);
-    assert.match(last(testShipper).body, new RegExp(testTrucker));
+    assert.match(delivered.filter((item) => item.to === testShipper).at(-2)!.message.body, new RegExp(testTrucker));
     assert.match(last(testTrucker).body, new RegExp(testShipper));
-    const receipt = last(testShipper).body.match(/received [\w.-]+/)?.[0];
-    assert.ok(receipt);
+    const share = last(testShipper);
+    assert.ok(share.kind === "receipt");
+    assert.match(share.share, /When the goods reach you, tap this link/);
+    const receipt = share.command;
+    assert.match(receipt, /^received [0-9a-f-]{36}\.[0-9a-f]{24}$/);
     const mark = button(testTrucker, "Mark delivered");
     await say(testTrucker, receipt);
     assert.equal(await c.shipments.countDocuments({ receivedAt: { $exists: true } }), 0);
@@ -307,13 +310,13 @@ test("WhatsApp webhook to shipment completion, cancellation, and analytics", { s
     assert.equal((await c.trips.findOne({ trucker: testTrucker }))?.capacity, 5000);
     await click(testTrucker, `capacity:${cancelled?.tripId}`);
     assert.equal(last(testTrucker).kind, "text");
-    for (const invalid of ["lots", "-1", "40.1", "0.01"]) {
+    for (const invalid of ["lots", "-1", "41", "2.5", "0.5"]) {
       await say(testTrucker, invalid);
-      assert.match(last(testTrucker).body, /Enter 0 or a number/);
+      assert.match(last(testTrucker).body, /whole tonnes from 1 to 40, for example 12/);
       assert.equal((await c.trips.findOne({ _id: trip._id }))?.capacity, 5000);
     }
-    await say(testTrucker, "2.5");
-    assert.equal((await c.trips.findOne({ _id: trip._id }))?.capacity, 2500);
+    await say(testTrucker, "2");
+    assert.equal((await c.trips.findOne({ _id: trip._id }))?.capacity, 2000);
     await click(testTrucker, `capacity:${trip._id}`);
     await say(testTrucker, " 0 ");
     assert.equal((await c.trips.findOne({ _id: trip._id }))?.capacity, 0);
@@ -337,6 +340,7 @@ test("WhatsApp webhook to shipment completion, cancellation, and analytics", { s
     await say(testTrucker, "3");
     assert.equal(delivered.slice(beforeRefresh).filter((item) => item.to === testShipper).length, 0);
   } finally {
+    await db.dropDatabase();
     await client.close();
   }
 });
