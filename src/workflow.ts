@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import type { ClientSession, Db } from "mongodb";
 import { collections, type Action, type Event, type FlowName, type FlowTicket, type Message, type PendingInput } from "./db";
 import {
-  capacityForm, checkForm, dateRange, dateWindow, day, dollars, findMatches, formatDeparture, hour, isActive,
+  capacityForm, checkForm, dateRange, dateWindow, day, dayOffset, dollars, findMatches, formatDeparture, hour, isActive,
   fixList, localDate, localMidnight, matchWindowDays, maxTonnes, offerForm, recordDelivery, requestForm, shipperForm, tripFits, tripForm, truckerForm,
   type Shipment, type TransportRequest, type Trip, type TripDetails,
 } from "./domain";
@@ -17,6 +17,11 @@ export const actions = {
 const help = { id: "help", title: "How it works" };
 const menuAction = { id: "menu", title: "Main menu" };
 const capacity = (kg: number) => `${kg / 1000} t`;
+// The departure, flagged when it is not on the shipper's requested day.
+const departureNote = (r: TransportRequest, trip: Trip) => {
+  const offset = dayOffset(r.date, trip.departureAt);
+  return `${formatDeparture(trip.departureAt)}${offset && ` · ${offset}`}`;
+};
 const loadDetails = (r: TransportRequest) => `${r.pickup} → ${r.dropoff} · ${capacity(r.weight)} of ${r.cargo} · ready ${r.date}`;
 const reference = (shipment: Shipment) => shipment._id.slice(0, 8).toUpperCase();
 
@@ -187,7 +192,7 @@ export class Workflow {
         await this.c.requests.insertOne(request, this.options);
         const { _id, pickup, dropoff, createdAt } = request;
         await this.c.searchMetrics.insertOne({ _id, pickup, dropoff, createdAt }, this.options);
-        await this.synchronizeMatching(request.date, matchWindowDays + 1);
+        await this.synchronizeMatching(localDate(dateWindow(request.date).start), 2 * matchWindowDays + 1);
         return this.showMatches(request, true);
       }
       case "trip": {
@@ -244,7 +249,10 @@ export class Workflow {
     const requests = await this.c.requests.find({
       shipper: { $ne: trip.trucker }, cancelledAt: { $exists: false },
       $or: [{ expiresAt: { $exists: false } }, { expiresAt: { $gt: this.now } }],
-      date: { $gte: localDate(new Date(trip.departureAt.getTime() - matchWindowDays * day)), $lte: localDate(trip.departureAt) },
+      date: {
+        $gte: localDate(new Date(trip.departureAt.getTime() - matchWindowDays * day)),
+        $lte: localDate(new Date(trip.departureAt.getTime() + matchWindowDays * day)),
+      },
       cargo: { $in: trip.acceptedCargo }, weight: { $lte: trip.capacity },
     }, this.options).sort({ date: 1, createdAt: 1, _id: 1 }).toArray();
     if (!requests.length) return [];
@@ -271,7 +279,7 @@ export class Workflow {
     await this.c.searchMetrics.updateMany({ _id: { $in: ids }, matchedAt: { $exists: false } }, { $set: { matchedAt: this.now } }, this.options);
     const alerts = fresh.map((request) => this.outboxItem(request.shipper, {
       kind: "buttons",
-      body: `A truck now fits your load.\n${loadDetails(request)}\nTruck from ${trip.origin} to ${trip.destination}, ${formatDeparture(trip.departureAt)} · ${capacity(trip.capacity)} free.`,
+      body: `A truck now fits your load.\n${loadDetails(request)}\nTruck from ${trip.origin} to ${trip.destination}, ${departureNote(request, trip)} · ${capacity(trip.capacity)} free.`,
       actions: [
         { id: `select:${request._id}:${trip._id}`, title: "Request a price" },
         { id: `results:${request._id}`, title: "See available trucks" },
@@ -299,7 +307,7 @@ export class Workflow {
     await this.c.searchMetrics.updateOne({ _id: request._id, matchedAt: { $exists: false } }, { $set: { matchedAt: this.now } }, this.options);
     await this.choose(`Available trucks for ${request.pickup} to ${request.dropoff}. Choose one to request a price.`, matches.map((trip, i) => ({
       id: `select:${request._id}:${trip._id}`, title: `Truck ${i + 1} · ${capacity(trip.capacity)} free`,
-      description: `${trip.origin} → ${trip.destination} · ${formatDeparture(trip.departureAt)}`,
+      description: `${trip.origin} → ${trip.destination} · ${departureNote(request, trip)}`,
     })));
     if (!newSearch) return;
     await this.c.requests.updateOne({ _id: request._id }, {
