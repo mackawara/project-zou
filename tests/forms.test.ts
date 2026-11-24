@@ -86,8 +86,8 @@ test("a search keeps up to three load photos as media IDs", () => {
   const three = parsed([photo("111"), photo("222", "image/png"), { mime_type: "image/jpeg", media_id: "333" }]);
   assert.ok(three.ok);
   assert.deepEqual(three.data.photos, ["111", "222", "333"]);
-  for (const photos of [[photo("1"), photo("2"), photo("3"), photo("4")], [photo("1", "application/pdf")], [photo("../etc")], "photo"]) {
-    assert.deepEqual(problems(parsed(photos)), ["Add up to 3 photos of the load."], JSON.stringify(photos));
+  for (const photos of [[photo("1"), photo("2"), photo("3"), photo("4")], [photo("1", "application/pdf")], [photo("1", "image/webp")], [photo("../etc")], "photo"]) {
+    assert.deepEqual(problems(parsed(photos)), ["Add up to 3 JPEG or PNG photos of the load, each up to 5 MB."], JSON.stringify(photos));
   }
 });
 
@@ -121,4 +121,23 @@ test("a photo is copied to a new upload and sent with its caption, only inside t
   });
   download = 404;
   await assert.rejects(sendWhatsApp("263770000000", image, true), /WhatsApp send failed \(media download, HTTP 404\)/);
+  // Photos WhatsApp cannot send are refused before any upload.
+  download = 200;
+  for (const [lookup, error] of [[{ mime_type: "image/webp" }, /media type unsupported/], [{ mime_type: "image/png", file_size: 5 * 1024 * 1024 + 1 }, /media too large/]] as const) {
+    calls.length = 0;
+    t.mock.method(globalThis, "fetch", async (url: string, init: RequestInit = {}) => {
+      calls.push({ url, method: init.method ?? "GET" });
+      return Response.json({ url: "https://lookaside.example/555", ...lookup });
+    });
+    await assert.rejects(sendWhatsApp("263770000000", image, true), error);
+    assert.deepEqual(calls.map(({ method }) => method), ["GET"]);
+  }
+  calls.length = 0;
+  t.mock.method(globalThis, "fetch", async (url: string, init: RequestInit = {}) => {
+    calls.push({ url, method: init.method ?? "GET" });
+    return url.endsWith("/555") && url.startsWith("https://lookaside")
+      ? new Response(new Uint8Array(5 * 1024 * 1024 + 1)) : Response.json({ url: "https://lookaside.example/555", mime_type: "image/jpeg" });
+  });
+  await assert.rejects(sendWhatsApp("263770000000", image, true), /media too large/);
+  assert.equal(calls.filter(({ method }) => method === "POST").length, 0);
 });

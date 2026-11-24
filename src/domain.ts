@@ -11,6 +11,9 @@ export const day = 24 * hour;
 export const bookingWindowDays = 30;
 export const maxTonnes = 40;
 export const maxPhotos = 3;
+// WhatsApp sends images up to 5 MB, as JPEG or PNG only.
+export const maxPhotoKb = 5120;
+export const photoTypes = ["image/jpeg", "image/png"] as const;
 
 const anyTown = z.enum(towns);
 const town = (label: string) => z.enum(towns, { error: `Choose the ${label} from the list.` });
@@ -34,10 +37,10 @@ const differentTowns = (from: string, to: string, message: string) => ({
 });
 
 // Flow photo pickers submit WhatsApp media objects; only the media ID is kept.
-const photoProblem = `Add up to ${maxPhotos} photos of the load.`;
+const photoProblem = `Add up to ${maxPhotos} JPEG or PNG photos of the load, each up to ${maxPhotoKb / 1024} MB.`;
 const photo = z.object({
   id: z.string().regex(/^\d{1,64}$/, photoProblem).optional(), media_id: z.string().regex(/^\d{1,64}$/, photoProblem).optional(),
-  mime_type: z.string({ error: photoProblem }).regex(/^image\//, photoProblem),
+  mime_type: z.enum(photoTypes, { error: photoProblem }),
 }, { error: photoProblem }).refine((item) => item.id ?? item.media_id, photoProblem).transform((item) => (item.id ?? item.media_id)!);
 const photos = z.array(photo, { error: photoProblem }).max(maxPhotos, photoProblem).optional().default([]);
 

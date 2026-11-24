@@ -1,6 +1,7 @@
 import { createHmac } from "node:crypto";
 import { z } from "zod";
 import type { Event, Message } from "./db";
+import { maxPhotoKb, photoTypes } from "./domain";
 import { logger } from "./logger";
 import { sameSecret } from "./secrets";
 
@@ -167,13 +168,18 @@ async function forwardMedia(mediaId: string) {
   const info = await fetch(graph(encodeURIComponent(mediaId)), { headers: auth(), signal: AbortSignal.timeout(8000) });
   const media = await info.json().catch(() => null);
   if (!info.ok || typeof media?.url !== "string") throw fail("lookup", info.status);
+  // WhatsApp would reject these on every retry, so stop before downloading.
+  const type = photoTypes.find((t) => t === media.mime_type);
+  if (!type) throw fail("type unsupported");
+  if (Number(media.file_size) > maxPhotoKb * 1024) throw fail("too large");
   const file = await fetch(media.url, { headers: auth(), signal: AbortSignal.timeout(20_000) });
   if (!file.ok) throw fail("download", file.status);
-  const type = typeof media.mime_type === "string" && media.mime_type.startsWith("image/") ? media.mime_type : "image/jpeg";
+  const bytes = await file.arrayBuffer();
+  if (bytes.byteLength > maxPhotoKb * 1024) throw fail("too large");
   const form = new FormData();
   form.append("messaging_product", "whatsapp");
   form.append("type", type);
-  form.append("file", new Blob([await file.arrayBuffer()], { type }), "load." + (type.split("/")[1] || "jpg"));
+  form.append("file", new Blob([bytes], { type }), type === "image/png" ? "load.png" : "load.jpg");
   const upload = await fetch(graph(`${process.env.WA_PHONE_NUMBER_ID?.trim()}/media`), {
     method: "POST", headers: auth(), body: form, signal: AbortSignal.timeout(20_000),
   });
