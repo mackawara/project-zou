@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { capacityForm, checkForm, dateAllowed, dateRange, fixList, requestForm, tripForm, truckerForm } from "../src/domain";
+import { capacityForm, checkForm, dateAllowed, dateRange, fixList, readFormReply, requestForm, tripForm, truckerForm } from "../src/domain";
 import { sendWhatsApp } from "../src/whatsapp";
 
 // 23 Nov 2026, 10:00 in Harare.
@@ -89,6 +89,19 @@ test("a search keeps up to three load photos as media IDs", () => {
   for (const photos of [[photo("1"), photo("2"), photo("3"), photo("4")], [photo("1", "application/pdf")], [photo("1", "image/webp")], [photo("../etc")], "photo"]) {
     assert.deepEqual(problems(parsed(photos)), ["Add up to 3 JPEG or PNG photos of the load, each up to 5 MB."], JSON.stringify(photos));
   }
+});
+
+test("photo media IDs sent as long JSON numbers keep every digit", () => {
+  const reply = JSON.stringify({ ...search, flow_token: "t", notes: 'Label says "id": 5' }).slice(0, -1)
+    + ',"photos":[{"file_name":"a.jpg","mime_type":"image/jpeg","id":12345678901234567},{"mime_type":"image/png","media_id" : 98765432109876543}]}';
+  const read = readFormReply(reply) as Record<string, unknown>;
+  assert.equal(read.notes, 'Label says "id": 5');
+  const result = checkForm(requestForm, read, now, "load date");
+  assert.ok(result.ok);
+  assert.deepEqual(result.data.photos, ["12345678901234567", "98765432109876543"]);
+  // A wrong type gets the photo hint, never Zod's generic "expected string" text.
+  assert.deepEqual(problems(checkForm(requestForm, { ...search, photos: [{ mime_type: "image/jpeg", id: 5 }] }, now)),
+    ["Add up to 3 JPEG or PNG photos of the load, each up to 5 MB."]);
 });
 
 test("a photo is copied to a new upload and sent with its caption, only inside the window", async (t) => {
