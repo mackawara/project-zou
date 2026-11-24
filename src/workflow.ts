@@ -3,7 +3,7 @@ import type { ClientSession, Db } from "mongodb";
 import { collections, type Action, type Event, type FlowName, type FlowTicket, type Message, type PendingInput } from "./db";
 import {
   capacityForm, checkForm, dateRange, dateWindow, day, dayOffset, dollars, findMatches, formatDeparture, hour, isActive,
-  fixList, localDate, localMidnight, matchWindowDays, maxTonnes, offerForm, recordDelivery, requestForm, shipperForm, tripFits, tripForm, truckerForm,
+  fixList, localDate, localMidnight, matchWindowDays, maxTonnes, offerForm, readFormReply, recordDelivery, requestForm, shipperForm, tripFits, tripForm, truckerForm,
   type Shipment, type TransportRequest, type Trip, type TripDetails,
 } from "./domain";
 import { guideButtons, guides, helpCommands, menu, overview, welcome, type Guide } from "./guide";
@@ -173,7 +173,7 @@ export class Workflow {
   private async submit(raw: string) {
     let result: Record<string, unknown>;
     try {
-      result = JSON.parse(raw);
+      result = readFormReply(raw) as Record<string, unknown>;
     } catch {
       return this.say("This form could not be read. Reply MENU to try again.");
     }

@@ -39,7 +39,8 @@ const differentTowns = (from: string, to: string, message: string) => ({
 // Flow photo pickers submit WhatsApp media objects; only the media ID is kept.
 const photoProblem = `Add up to ${maxPhotos} JPEG or PNG photos of the load, each up to ${maxPhotoKb / 1024} MB.`;
 const photo = z.object({
-  id: z.string().regex(/^\d{1,64}$/, photoProblem).optional(), media_id: z.string().regex(/^\d{1,64}$/, photoProblem).optional(),
+  id: z.string({ error: photoProblem }).regex(/^\d{1,64}$/, photoProblem).optional(),
+  media_id: z.string({ error: photoProblem }).regex(/^\d{1,64}$/, photoProblem).optional(),
   mime_type: z.enum(photoTypes, { error: photoProblem }),
 }, { error: photoProblem }).refine((item) => item.id ?? item.media_id, photoProblem).transform((item) => (item.id ?? item.media_id)!);
 const photos = z.array(photo, { error: photoProblem }).max(maxPhotos, photoProblem).optional().default([]);
@@ -57,7 +58,7 @@ export const truckerForm = z.object({
 export const requestForm = z.object({
   pickup: town("pickup town"), dropoff: town("drop-off town"), date: date("date the load is ready"),
   cargo: z.enum(cargo, { error: "Choose the cargo type from the list." }), weight: tonnes("weight"),
-  notes: z.string().trim().max(200, "Shorten the handling notes to 200 characters or fewer.").optional().default(""),
+  notes: z.string({ error: "Enter the handling notes as text." }).trim().max(200, "Shorten the handling notes to 200 characters or fewer.").optional().default(""),
   photos,
 }).refine(({ pickup, dropoff }) => pickup !== dropoff,
   differentTowns("pickup", "dropoff", "Pickup and drop-off are the same town. Choose a different drop-off town."));
@@ -77,6 +78,14 @@ export const offerForm = z.object({
 });
 
 /** One line per problem, in form order, for a reply that tells the user exactly what to fix. */
+/**
+ * Reads a submitted Flow reply. WhatsApp sends photo media IDs as bare JSON numbers, which are
+ * often too long for a JavaScript number, so they are quoted first to keep every digit.
+ */
+export function readFormReply(raw: string): unknown {
+  return JSON.parse(raw.replace(/(?<!\\)"(id|media_id)"\s*:\s*(\d+)/g, '"$1":"$2"'));
+}
+
 export function formProblems(error: z.ZodError) {
   return [...new Set(error.issues.map((issue) => issue.message))];
 }
