@@ -1,5 +1,5 @@
 import { mkdir, rm, writeFile } from "node:fs/promises";
-import { bookingWindowDays, cargo, maxTonnes, towns } from "../src/domain";
+import { bookingWindowDays, cargo, maxPhotos, maxTonnes, towns } from "../src/domain";
 
 // Flow `pattern` (v6.2+) blocks a bad value inside WhatsApp before it is submitted,
 // and `helper-text` (required with a pattern) doubles as the example shown under the field.
@@ -36,7 +36,10 @@ const forms = {
       dropdown("pickup", "Pickup town", towns), dropdown("dropoff", "Drop-off town", towns),
       date("Date load is ready", ahead), dropdown("cargo", "Cargo type", cargo),
       input("weight", "Weight (tonnes)", { max: 2, type: "number", pattern: wholeTonnes, helper: `Whole tonnes from 1 to ${maxTonnes}, e.g. 12` }),
-      { type: "TextArea", name: "notes", label: "Handling notes", required: false, "max-length": 200, "helper-text": "Optional, e.g. Keep dry, fragile, needs a tarpaulin" }],
+      { type: "TextArea", name: "notes", label: "Handling notes", required: false, "max-length": 200, "helper-text": "Optional, e.g. Keep dry, fragile, needs a tarpaulin" },
+      // Photos reach only the trucker the shipper later asks for a price.
+      { type: "PhotoPicker", name: "photos", label: "Photos of the load", description: `Optional. Up to ${maxPhotos} photos help truckers judge size and packing.`,
+        "photo-source": "camera_gallery", "min-uploaded-photos": 0, "max-uploaded-photos": maxPhotos, "max-file-size-kb": 10240 }],
   },
   trip: {
     title: "Advertise space", data: dateData, fields: [

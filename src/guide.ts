@@ -37,7 +37,7 @@ export const guides: Record<Guide, string> = {
   shipper: [
     "Sending goods",
     "",
-    "1. Tap Find a truck and enter the pickup, destination, ready date, cargo and weight. You can search without registering.",
+    "1. Tap Find a truck and enter the pickup, destination, ready date, cargo and weight. You can add up to 3 photos of the load; only the trucker you ask for a price sees them. You can search without registering.",
     "2. Zunde lists trucks leaving up to two days before or after your date. Choose one to ask for a price. The first time, add your name.",
     "3. The trucker replies with a total price in USD. Accept it, or choose another truck. A request with no reply expires after 2 hours.",
     "4. When you accept, you each get the other's phone number. Arrange payment directly with the trucker.",

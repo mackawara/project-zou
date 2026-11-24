@@ -428,10 +428,15 @@ export class Workflow {
     if (!request) return this.say("This shipment could not be found.", to);
     const load = `${request.pickup} → ${request.dropoff} · ${capacity(request.weight)} of ${request.cargo}`;
     if (shipment.state === "requested") {
-      return shipper
-        ? this.choose(`Shipment ${ref} · ${load}\nWaiting for the trucker's offer.`, [action("withdraw", "Choose another"), actions.activity], to)
-        : this.choose(`New shipment request ${ref} · ${load}\nReady from ${request.date}.\nSend an offer if you have space.`,
-          [action("offer", "Make an offer"), action("decline", "Decline")], to);
+      if (shipper) return this.choose(`Shipment ${ref} · ${load}\nWaiting for the trucker's offer.`, [action("withdraw", "Choose another"), actions.activity], to);
+      // The shipper's photos go only to the trucker asked for a price, before the buttons.
+      const photos = request.photos ?? [];
+      for (const [i, mediaId] of photos.entries()) {
+        await this.send(to, { kind: "image", mediaId, body: `Photo ${i + 1} of ${photos.length} · shipment ${ref} · ${load}` });
+      }
+      const photoNote = photos.length ? `\n${photos.length === 1 ? "Photo" : `${photos.length} photos`} of the load sent above.` : "";
+      return this.choose(`New shipment request ${ref} · ${load}\nReady from ${request.date}.${photoNote}\nSend an offer if you have space.`,
+        [action("offer", "Make an offer"), action("decline", "Decline")], to);
     }
     const amount = dollars(shipment.priceCents!);
     if (shipment.state === "offered") {

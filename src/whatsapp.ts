@@ -67,7 +67,7 @@ export function eventsFrom(payload: unknown, phoneId: string, now = new Date()):
   return events;
 }
 
-function messageBody(message: Exclude<Message, { kind: "receipt" }>) {
+function messageBody(message: Exclude<Message, { kind: "receipt" | "image" }>) {
   if (message.kind === "text") return { type: "text", text: { body: message.body, preview_url: false } };
   const body = { text: message.body };
   switch (message.kind) {
@@ -155,6 +155,33 @@ function postMessages(body: Record<string, unknown>) {
   });
 }
 
+const graph = (path: string) => `https://graph.facebook.com/${process.env.WA_GRAPH_VERSION}/${path}`;
+const auth = () => ({ authorization: `Bearer ${process.env.WA_ACCESS_TOKEN}` });
+
+/**
+ * Copies media a user sent (e.g. Flow photos) to a new upload under Zunde's number, so it can be
+ * sent to someone else. Download URLs expire after minutes, so they are looked up at send time.
+ */
+async function forwardMedia(mediaId: string) {
+  const fail = (step: string, status?: number) => new Error(`WhatsApp send failed (media ${step}${status ? `, HTTP ${status}` : ""})`);
+  const info = await fetch(graph(encodeURIComponent(mediaId)), { headers: auth(), signal: AbortSignal.timeout(8000) });
+  const media = await info.json().catch(() => null);
+  if (!info.ok || typeof media?.url !== "string") throw fail("lookup", info.status);
+  const file = await fetch(media.url, { headers: auth(), signal: AbortSignal.timeout(20_000) });
+  if (!file.ok) throw fail("download", file.status);
+  const type = typeof media.mime_type === "string" && media.mime_type.startsWith("image/") ? media.mime_type : "image/jpeg";
+  const form = new FormData();
+  form.append("messaging_product", "whatsapp");
+  form.append("type", type);
+  form.append("file", new Blob([await file.arrayBuffer()], { type }), "load." + (type.split("/")[1] || "jpg"));
+  const upload = await fetch(graph(`${process.env.WA_PHONE_NUMBER_ID?.trim()}/media`), {
+    method: "POST", headers: auth(), body: form, signal: AbortSignal.timeout(20_000),
+  });
+  const uploaded = await upload.json().catch(() => null);
+  if (!upload.ok || typeof uploaded?.id !== "string") throw fail("upload", upload.status);
+  return uploaded.id;
+}
+
 /** Marks an incoming message as read, so the sender sees blue ticks once it has been handled. */
 export async function markRead(messageId: string) {
   if (!graphConfigured()) return;
@@ -170,6 +197,17 @@ export async function sendWhatsApp(to: string, message: Message, inWindow: boole
   const { WA_UPDATE_TEMPLATE, WA_TEMPLATE_LANGUAGE } = process.env;
   if (!graphConfigured()) throw new Error("WhatsApp sending is not configured");
   const template = WA_UPDATE_TEMPLATE?.trim();
+  // Images can only be sent in the customer-service window. The message they accompany
+  // already brings the recipient back, and reopening it resends the photos.
+  if (message.kind === "image") {
+    if (!inWindow) return;
+    const res = await postMessages({ to, type: "image", image: { id: await forwardMedia(message.mediaId), caption: message.body } });
+    if (!res.ok) {
+      const result = await res.json().catch(() => null);
+      throw new Error(`WhatsApp send failed (HTTP ${res.status}, image)`, { cause: result?.error ?? result });
+    }
+    return;
+  }
   if (!inWindow && !template) {
     throw new Error("WhatsApp send failed: WA_UPDATE_TEMPLATE is required outside the customer-service window");
   }
