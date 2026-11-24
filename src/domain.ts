@@ -10,6 +10,10 @@ export const day = 24 * hour;
 
 export const bookingWindowDays = 30;
 export const maxTonnes = 40;
+export const maxPhotos = 3;
+// WhatsApp sends images up to 5 MB, as JPEG or PNG only.
+export const maxPhotoKb = 5120;
+export const photoTypes = ["image/jpeg", "image/png"] as const;
 
 const anyTown = z.enum(towns);
 const town = (label: string) => z.enum(towns, { error: `Choose the ${label} from the list.` });
@@ -32,6 +36,14 @@ const differentTowns = (from: string, to: string, message: string) => ({
   },
 });
 
+// Flow photo pickers submit WhatsApp media objects; only the media ID is kept.
+const photoProblem = `Add up to ${maxPhotos} JPEG or PNG photos of the load, each up to ${maxPhotoKb / 1024} MB.`;
+const photo = z.object({
+  id: z.string().regex(/^\d{1,64}$/, photoProblem).optional(), media_id: z.string().regex(/^\d{1,64}$/, photoProblem).optional(),
+  mime_type: z.enum(photoTypes, { error: photoProblem }),
+}, { error: photoProblem }).refine((item) => item.id ?? item.media_id, photoProblem).transform((item) => (item.id ?? item.media_id)!);
+const photos = z.array(photo, { error: photoProblem }).max(maxPhotos, photoProblem).optional().default([]);
+
 export const shipperForm = z.object({ name: text("your name", 80) });
 export const truckerForm = z.object({
   name: text("your full name", 80),
@@ -46,6 +58,7 @@ export const requestForm = z.object({
   pickup: town("pickup town"), dropoff: town("drop-off town"), date: date("date the load is ready"),
   cargo: z.enum(cargo, { error: "Choose the cargo type from the list." }), weight: tonnes("weight"),
   notes: z.string().trim().max(200, "Shorten the handling notes to 200 characters or fewer.").optional().default(""),
+  photos,
 }).refine(({ pickup, dropoff }) => pickup !== dropoff,
   differentTowns("pickup", "dropoff", "Pickup and drop-off are the same town. Choose a different drop-off town."));
 export const tripForm = z.object({
@@ -86,7 +99,8 @@ export function fixList(problems: string[]) {
   return `Please fix ${problems.length === 1 ? "this" : "these"} and submit the form again:\n${problems.map((p) => `• ${p}`).join("\n")}`;
 }
 
-export type RequestDetails = z.output<typeof requestForm>;
+// Searches saved before photo uploads have no `photos`.
+export type RequestDetails = Omit<z.output<typeof requestForm>, "photos"> & { photos?: string[] };
 export type TripDetails = z.output<typeof tripForm>;
 export type Trip = Omit<TripDetails, "date" | "time"> & {
   _id: string; trucker: string; departureAt: Date; createdAt: Date; closedAt?: Date; lastAcceptedAt?: Date;

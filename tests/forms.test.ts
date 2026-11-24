@@ -77,3 +77,67 @@ test("Flow messages carry the date limits for the calendar", async (t) => {
   const payloads = sent.map((body) => body.interactive.action.parameters.flow_action_payload);
   assert.deepEqual(payloads, [{ screen: "FORM", data: screen }, { screen: "FORM" }]);
 });
+
+test("a search keeps up to three load photos as media IDs", () => {
+  const photo = (id: string, mime_type = "image/jpeg") => ({ file_name: "load.jpg", mime_type, sha256: "abc", id });
+  const parsed = (photos: unknown) => checkForm(requestForm, { ...search, photos }, now, "load date");
+  const none = checkForm(requestForm, search, now, "load date");
+  assert.ok(none.ok && none.data.photos.length === 0);
+  const three = parsed([photo("111"), photo("222", "image/png"), { mime_type: "image/jpeg", media_id: "333" }]);
+  assert.ok(three.ok);
+  assert.deepEqual(three.data.photos, ["111", "222", "333"]);
+  for (const photos of [[photo("1"), photo("2"), photo("3"), photo("4")], [photo("1", "application/pdf")], [photo("1", "image/webp")], [photo("../etc")], "photo"]) {
+    assert.deepEqual(problems(parsed(photos)), ["Add up to 3 JPEG or PNG photos of the load, each up to 5 MB."], JSON.stringify(photos));
+  }
+});
+
+test("a photo is copied to a new upload and sent with its caption, only inside the window", async (t) => {
+  const keys = ["WA_ACCESS_TOKEN", "WA_GRAPH_VERSION", "WA_PHONE_NUMBER_ID", "WA_UPDATE_TEMPLATE"];
+  const saved = keys.map((key) => process.env[key]);
+  t.after(() => keys.forEach((key, i) => saved[i] === undefined ? delete process.env[key] : process.env[key] = saved[i]));
+  Object.assign(process.env, { WA_ACCESS_TOKEN: "test-token", WA_GRAPH_VERSION: "v23.0", WA_PHONE_NUMBER_ID: "123", WA_UPDATE_TEMPLATE: "pilot_update" });
+  const calls: { url: string; method: string; body?: unknown }[] = [];
+  let download = 200;
+  t.mock.method(globalThis, "fetch", async (url: string, init: RequestInit = {}) => {
+    const method = init.method ?? "GET";
+    calls.push({ url, method, body: init.body });
+    assert.equal((init.headers as Record<string, string>).authorization, "Bearer test-token");
+    if (url.endsWith("/v23.0/555")) return Response.json({ url: "https://lookaside.example/555", mime_type: "image/png" });
+    if (url === "https://lookaside.example/555") return new Response(new Uint8Array([1, 2, 3]), { status: download });
+    if (url.endsWith("/123/media")) return Response.json({ id: "999" });
+    return Response.json({});
+  });
+  const image = { kind: "image", mediaId: "555", body: "Photo 1 of 1" } as const;
+  await sendWhatsApp("263770000000", image, false);
+  assert.equal(calls.length, 0);
+  await sendWhatsApp("263770000000", image, true);
+  assert.deepEqual(calls.map(({ url, method }) => `${method} ${url.replace("https://graph.facebook.com/v23.0", "")}`),
+    ["GET /555", "GET https://lookaside.example/555", "POST /123/media", "POST /123/messages"]);
+  const upload = calls[2].body as FormData;
+  assert.equal(upload.get("messaging_product"), "whatsapp");
+  assert.equal((upload.get("file") as Blob).type, "image/png");
+  assert.deepEqual(JSON.parse(String(calls[3].body)), {
+    messaging_product: "whatsapp", to: "263770000000", type: "image", image: { id: "999", caption: "Photo 1 of 1" },
+  });
+  download = 404;
+  await assert.rejects(sendWhatsApp("263770000000", image, true), /WhatsApp send failed \(media download, HTTP 404\)/);
+  // Photos WhatsApp cannot send are refused before any upload.
+  download = 200;
+  for (const [lookup, error] of [[{ mime_type: "image/webp" }, /media type unsupported/], [{ mime_type: "image/png", file_size: 5 * 1024 * 1024 + 1 }, /media too large/]] as const) {
+    calls.length = 0;
+    t.mock.method(globalThis, "fetch", async (url: string, init: RequestInit = {}) => {
+      calls.push({ url, method: init.method ?? "GET" });
+      return Response.json({ url: "https://lookaside.example/555", ...lookup });
+    });
+    await assert.rejects(sendWhatsApp("263770000000", image, true), error);
+    assert.deepEqual(calls.map(({ method }) => method), ["GET"]);
+  }
+  calls.length = 0;
+  t.mock.method(globalThis, "fetch", async (url: string, init: RequestInit = {}) => {
+    calls.push({ url, method: init.method ?? "GET" });
+    return url.endsWith("/555") && url.startsWith("https://lookaside")
+      ? new Response(new Uint8Array(5 * 1024 * 1024 + 1)) : Response.json({ url: "https://lookaside.example/555", mime_type: "image/jpeg" });
+  });
+  await assert.rejects(sendWhatsApp("263770000000", image, true), /media too large/);
+  assert.equal(calls.filter(({ method }) => method === "POST").length, 0);
+});
