@@ -164,16 +164,21 @@ const auth = () => ({ authorization: `Bearer ${process.env.WA_ACCESS_TOKEN}` });
  * sent to someone else. Download URLs expire after minutes, so they are looked up at send time.
  */
 async function forwardMedia(mediaId: string) {
-  const fail = (step: string, status?: number) => new Error(`WhatsApp send failed (media ${step}${status ? `, HTTP ${status}` : ""})`);
+  // Meta's error code goes in the message, which production logs keep, and its full error in `cause`.
+  const fail = (step: string, status?: number, result?: { error?: { code?: unknown } } | null) => {
+    const code = Number(result?.error?.code);
+    return new Error(`WhatsApp send failed (media ${step}${status ? `, HTTP ${status}` : ""}${code ? `, code ${code}` : ""})`,
+      { cause: result?.error ?? result ?? undefined });
+  };
   const info = await fetch(graph(encodeURIComponent(mediaId)), { headers: auth(), signal: AbortSignal.timeout(8000) });
   const media = await info.json().catch(() => null);
-  if (!info.ok || typeof media?.url !== "string") throw fail("lookup", info.status);
+  if (!info.ok || typeof media?.url !== "string") throw fail("lookup", info.status, media);
   // WhatsApp would reject these on every retry, so stop before downloading.
   const type = photoTypes.find((t) => t === media.mime_type);
   if (!type) throw fail("type unsupported");
   if (Number(media.file_size) > maxPhotoKb * 1024) throw fail("too large");
   const file = await fetch(media.url, { headers: auth(), signal: AbortSignal.timeout(20_000) });
-  if (!file.ok) throw fail("download", file.status);
+  if (!file.ok) throw fail("download", file.status, await file.json().catch(() => null));
   const bytes = await file.arrayBuffer();
   if (bytes.byteLength > maxPhotoKb * 1024) throw fail("too large");
   const form = new FormData();
@@ -184,7 +189,7 @@ async function forwardMedia(mediaId: string) {
     method: "POST", headers: auth(), body: form, signal: AbortSignal.timeout(20_000),
   });
   const uploaded = await upload.json().catch(() => null);
-  if (!upload.ok || typeof uploaded?.id !== "string") throw fail("upload", upload.status);
+  if (!upload.ok || typeof uploaded?.id !== "string") throw fail("upload", upload.status, uploaded);
   return uploaded.id;
 }
 
@@ -206,11 +211,15 @@ export async function sendWhatsApp(to: string, message: Message, inWindow: boole
   // Images can only be sent in the customer-service window. The message they accompany
   // already brings the recipient back, and reopening it resends the photos.
   if (message.kind === "image") {
-    if (!inWindow) return;
+    const skipped = () => logger.info("Photo not sent: recipient outside the 24-hour window");
+    if (!inWindow) return skipped();
     const res = await postMessages({ to, type: "image", image: { id: await forwardMedia(message.mediaId), caption: message.body } });
     if (!res.ok) {
       const result = await res.json().catch(() => null);
-      throw new Error(`WhatsApp send failed (HTTP ${res.status}, image)`, { cause: result?.error ?? result });
+      const code = Number(result?.error?.code);
+      // Meta's window has closed although ours had not: retrying would fail the same way.
+      if (code === 131047) return skipped();
+      throw new Error(`WhatsApp send failed (HTTP ${res.status}${code ? `, code ${code}` : ""}, image)`, { cause: result?.error ?? result });
     }
     return;
   }

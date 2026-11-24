@@ -153,4 +153,14 @@ test("a photo is copied to a new upload and sent with its caption, only inside t
   });
   await assert.rejects(sendWhatsApp("263770000000", image, true), /media too large/);
   assert.equal(calls.filter(({ method }) => method === "POST").length, 0);
+  // Meta's error code is named, so production logs show why a photo was not copied.
+  t.mock.method(globalThis, "fetch", async () => Response.json({ error: { code: 100, message: "Unsupported get request" } }, { status: 400 }));
+  await assert.rejects(sendWhatsApp("263770000000", image, true), (error: Error) =>
+    /media lookup, HTTP 400, code 100\)/.test(error.message) && (error.cause as { code: number }).code === 100);
+  // When Meta says the window has closed, the photo is skipped rather than retried.
+  t.mock.method(globalThis, "fetch", async (url: string) => url.endsWith("/messages")
+    ? Response.json({ error: { code: 131047 } }, { status: 400 })
+    : url.startsWith("https://lookaside") ? new Response(new Uint8Array([1]))
+    : url.endsWith("/media") ? Response.json({ id: "999" }) : Response.json({ url: "https://lookaside.example/555", mime_type: "image/jpeg" }));
+  await sendWhatsApp("263770000000", image, true);
 });
